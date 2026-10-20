@@ -1043,8 +1043,11 @@ alongside the subject image in GHCR, and as the Sigstore bundle release assets
 described above. The API copy supports normal repository-
 scoped verification; the OCI copy supports registry-native discovery and
 verification and can travel with tooling that preserves OCI referrers. Sentinel
-does not request a GitHub artifact storage record because that feature applies
-only to organization-owned repositories.
+does not request a GitHub artifact storage record (`create-storage-record:
+false`): the record adds storage details, such as the registry that hosts the
+image, to the organization's linked-artifact metadata, which no Sentinel
+process or consumer uses, and creating it would require granting the
+release-metadata job the additional `artifact-metadata: write` permission.
 
 #### Consumer discovery and verification
 
@@ -1060,8 +1063,8 @@ authenticated GitHub CLI (`gh`).
 ```bash
 set -euo pipefail
 
-VERSION="0.6.0"
-TAGGED_IMAGE="ghcr.io/staypirate/sentinel:${VERSION}"
+VERSION="1.2.3" # the published release to verify
+TAGGED_IMAGE="ghcr.io/vulnwatch/sentinel:${VERSION}"
 IMAGE_NAME="${TAGGED_IMAGE%:*}"
 DIGEST="$(docker buildx imagetools inspect "$TAGGED_IMAGE" \
   --format '{{json .Manifest}}' | jq -er '.digest')"
@@ -1071,14 +1074,14 @@ docker pull "$IMAGE"
 # Verify SLSA build provenance from Sentinel's release workflow, built from
 # this version's tag.
 gh attestation verify "oci://$IMAGE" \
-  --repo StayPirate/sentinel \
-  --signer-workflow StayPirate/sentinel/.github/workflows/build-images.yml \
+  --repo vulnwatch/sentinel \
+  --signer-workflow vulnwatch/sentinel/.github/workflows/build-images.yml \
   --source-ref "refs/tags/v${VERSION}"
 
 # Verify the signed CycloneDX SBOM claim.
 gh attestation verify "oci://$IMAGE" \
-  --repo StayPirate/sentinel \
-  --signer-workflow StayPirate/sentinel/.github/workflows/build-images.yml \
+  --repo vulnwatch/sentinel \
+  --signer-workflow vulnwatch/sentinel/.github/workflows/build-images.yml \
   --source-ref "refs/tags/v${VERSION}" \
   --predicate-type https://cyclonedx.org/bom
 
@@ -1091,7 +1094,7 @@ the registry-side OCI copy instead of querying GitHub's Attestations API, or
 `--bundle sentinel-<version>.sbom.sigstore.json` for the SBOM claim) to verify
 the downloaded release asset.
 
-An exact-version tag such as `0.6.0` expresses release identity. The release
+An exact-version tag such as `1.2.3` expresses release identity. The release
 workflow never moves it after the GitHub Release is published (see Release
 Publication and Immutability), but the registry itself does not enforce tag
 immutability: the tag remains a lookup reference that an actor with package
@@ -1112,6 +1115,21 @@ trusted-root` before entering the offline environment. A release published
 with release immutability also carries a GitHub release attestation over its
 Git tag and assets, which `gh release verify` and `gh release verify-asset`
 check.
+
+**Releases published before the organization move.** The repository moved
+from `StayPirate/sentinel` to `vulnwatch/sentinel` after release 0.10.2.
+Releases up to and including 0.10.2 keep their images at
+`ghcr.io/staypirate/sentinel`, and their attestations name
+`StayPirate/sentinel` as the source repository and
+`StayPirate/sentinel/.github/workflows/build-images.yml` as the signer
+workflow. GitHub's Attestations API returns these attestations under the
+`StayPirate` account, not under the moved repository. To verify one of these
+releases, use the old image name and signer workflow with `--owner StayPirate`
+in place of `--repo`, or keep `--repo StayPirate/sentinel` and add
+`--bundle-from-oci` or the release's `--bundle` asset. `gh release verify` and
+`gh release verify-asset` no longer find the GitHub release attestation of
+these releases; their assets remain immutable, and the bundle assets keep the
+signed statements.
 
 ### Release Publication and Immutability
 
@@ -1157,7 +1175,7 @@ Repair of a failed version-tag run:
 | The release-metadata job fails while the GitHub Release is a draft | Re-run failed jobs. The rerun reuses the build job's digest and its SBOM and OpenAPI artifacts, may add equivalent attestations for the same digest, and replaces the draft's same-named assets |
 | A seven-day SBOM or OpenAPI workflow artifact expired while the GitHub Release is a draft | Re-run all jobs. The rebuild produces a new digest, with the same consequences as a rebuild after a build-job failure |
 | The release-metadata job fails because release-please created the tag but no draft release | Re-run the release-please workflow, which creates the missing draft, then re-run failed jobs |
-| Publication of the draft is refused although all four assets are attached | A maintainer resolves the `X.Y.Z` tag to its digest, confirms that the attached provenance bundle attests that digest (`gh attestation verify "oci://<image>@<digest>" --bundle sentinel-<version>.provenance.sigstore.json --repo StayPirate/sentinel --source-ref refs/tags/v<version>`), and publishes the draft with their own credentials (`gh release edit v<version> --draft=false`) |
+| Publication of the draft is refused although all four assets are attached | A maintainer resolves the `X.Y.Z` tag to its digest, confirms that the attached provenance bundle attests that digest (`gh attestation verify "oci://<image>@<digest>" --bundle sentinel-<version>.provenance.sigstore.json --repo vulnwatch/sentinel --source-ref refs/tags/v<version>`), and publishes the draft with their own credentials (`gh release edit v<version> --draft=false`) |
 | The GitHub Release is already published | Nothing to repair: a rerun of either job fails at the guard, before any push or attestation, and names the published release |
 
 ### API Documentation Publication
@@ -1240,7 +1258,9 @@ Locations above).
 The `release-please.yml` workflow requires a repository secret named
 `RELEASE_TOKEN` containing a Fine-Grained Personal Access Token (or
 GitHub App token) with `contents: write`, `issues: write`, and
-`pull-requests: write` permissions. The default `GITHUB_TOKEN` cannot
+`pull-requests: write` permissions. A fine-grained token covers only the
+repositories of its resource owner, which must be the account that owns this
+repository (the `vulnwatch` organization). The default `GITHUB_TOKEN` cannot
 be used because tags created by it do not trigger downstream workflows
 (a GitHub Actions limitation to prevent recursive runs).
 

@@ -13,14 +13,14 @@ Please report unacceptable behavior to security@suse.com.
 
 ### Reporting Bugs
 
-1. Check the [existing issues](https://github.com/StayPirate/sentinel/issues) to avoid duplicates
+1. Check the [existing issues](https://github.com/vulnwatch/sentinel/issues) to avoid duplicates
 2. Open a new issue using the **Bug Report** template
 3. Include steps to reproduce, expected behavior, and actual behavior
 4. Add the Sentinel version and your environment details
 
 ### Suggesting Features
 
-1. Check the [existing issues](https://github.com/StayPirate/sentinel/issues) and [feature specifications](docs/features/) to see if it has been discussed
+1. Check the [existing issues](https://github.com/vulnwatch/sentinel/issues) and [feature specifications](docs/features/) to see if it has been discussed
 2. Open a new issue using the **Feature Request** template
 3. Describe the problem you are trying to solve and the proposed solution
 

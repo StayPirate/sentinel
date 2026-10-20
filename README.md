@@ -6,20 +6,20 @@
 </p>
 
 <p align="center">
-<a href="https://github.com/StayPirate/sentinel/actions/workflows/ci.yml"><img src="https://github.com/StayPirate/sentinel/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
-<a href="https://github.com/StayPirate/sentinel/actions/workflows/image-scan.yml"><img src="https://github.com/StayPirate/sentinel/actions/workflows/image-scan.yml/badge.svg" alt="Image Scan"></a>
-<a href="https://github.com/StayPirate/sentinel/actions/workflows/python-forward-compat.yml"><img src="https://github.com/StayPirate/sentinel/actions/workflows/python-forward-compat.yml/badge.svg?branch=master" alt="Python Next"></a>
-<a href="https://codecov.io/gh/StayPirate/sentinel"><img src="https://codecov.io/gh/StayPirate/sentinel/graph/badge.svg" alt="codecov"></a>
+<a href="https://github.com/vulnwatch/sentinel/actions/workflows/ci.yml"><img src="https://github.com/vulnwatch/sentinel/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
+<a href="https://github.com/vulnwatch/sentinel/actions/workflows/image-scan.yml"><img src="https://github.com/vulnwatch/sentinel/actions/workflows/image-scan.yml/badge.svg" alt="Image Scan"></a>
+<a href="https://github.com/vulnwatch/sentinel/actions/workflows/python-forward-compat.yml"><img src="https://github.com/vulnwatch/sentinel/actions/workflows/python-forward-compat.yml/badge.svg?branch=master" alt="Python Next"></a>
+<a href="https://codecov.io/gh/vulnwatch/sentinel"><img src="https://codecov.io/gh/vulnwatch/sentinel/graph/badge.svg" alt="codecov"></a>
 </p>
 
 <p align="center">
-<a href="https://github.com/StayPirate/sentinel/releases"><img src="https://img.shields.io/github/v/release/StayPirate/sentinel" alt="Release"></a>
+<a href="https://github.com/vulnwatch/sentinel/releases"><img src="https://img.shields.io/github/v/release/vulnwatch/sentinel" alt="Release"></a>
 <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.14-blue?logo=python&logoColor=white" alt="Python"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
 </p>
 
 <p align="center">
-<a href="https://securityscorecards.dev/viewer/?uri=github.com/StayPirate/sentinel"><img src="https://api.securityscorecards.dev/projects/github.com/StayPirate/sentinel/badge" alt="OpenSSF Scorecard"></a>
+<a href="https://securityscorecards.dev/viewer/?uri=github.com/vulnwatch/sentinel"><img src="https://api.securityscorecards.dev/projects/github.com/vulnwatch/sentinel/badge" alt="OpenSSF Scorecard"></a>
 <a href="https://www.bestpractices.dev/projects/14063"><img src="https://www.bestpractices.dev/projects/14063/badge" alt="OpenSSF Best Practices"></a>
 <a href="https://www.bestpractices.dev/projects/14063"><img src="https://www.bestpractices.dev/projects/14063/baseline" alt="OpenSSF Baseline"></a>
 </p>
@@ -97,10 +97,10 @@ detailed component and data-flow diagrams.
 ## Project Status
 
 <p align="center">
-<img src="https://img.shields.io/github/issues/StayPirate/sentinel?label=issues%20open&color=orange" alt="Open Issues">
-<img src="https://img.shields.io/github/issues-closed/StayPirate/sentinel?label=issues%20closed&color=green" alt="Closed Issues">
-<img src="https://img.shields.io/github/issues-pr/StayPirate/sentinel?label=PRs%20open&color=orange" alt="Open PRs">
-<img src="https://img.shields.io/github/issues-pr-closed/StayPirate/sentinel?label=PRs%20closed&color=green" alt="Closed PRs">
+<img src="https://img.shields.io/github/issues/vulnwatch/sentinel?label=issues%20open&color=orange" alt="Open Issues">
+<img src="https://img.shields.io/github/issues-closed/vulnwatch/sentinel?label=issues%20closed&color=green" alt="Closed Issues">
+<img src="https://img.shields.io/github/issues-pr/vulnwatch/sentinel?label=PRs%20open&color=orange" alt="Open PRs">
+<img src="https://img.shields.io/github/issues-pr-closed/vulnwatch/sentinel?label=PRs%20closed&color=green" alt="Closed PRs">
 </p>
 
 Sentinel is in **active pre-1.0 development**.
@@ -110,7 +110,7 @@ commit. Graduation is intentional after the documented criteria are verified.
 See the [Release Process](docs/deployment.md#release-process).
 
 Implementation progress is tracked in the
-[milestones](https://github.com/StayPirate/sentinel/milestones).
+[milestones](https://github.com/vulnwatch/sentinel/milestones).
 
 ## Verifying Releases
 
@@ -158,7 +158,7 @@ commands.
 ## API Documentation
 
 Interactive API documentation (Swagger UI) is published to GitHub Pages on
-every version tag: **[API Docs](https://staypirate.github.io/sentinel/)**
+every version tag: **[API Docs](https://vulnwatch.github.io/sentinel/)**
 
 The OpenAPI document of each version is attached to its GitHub Release as
 `sentinel-<version>.openapi.json`; use it to pin the contract of a specific

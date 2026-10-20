@@ -258,7 +258,7 @@ class TestConstructionAndCredentials:
             assert request.headers["accept"] == "application/xml"
             assert request.headers["user-agent"].startswith("Sentinel/")
             assert (
-                "(ibs_client; +https://github.com/StayPirate/sentinel)"
+                "(ibs_client; +https://github.com/vulnwatch/sentinel)"
                 in (request.headers["user-agent"])
             )
             assert request.url.host == "api.ibs.example.test"

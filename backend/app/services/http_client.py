@@ -502,7 +502,7 @@ def _network_transport(
 # HTTP client factory
 # ---------------------------------------------------------------------------
 
-_PROJECT_URL = "https://github.com/StayPirate/sentinel"
+_PROJECT_URL = "https://github.com/vulnwatch/sentinel"
 
 # `httpx.AsyncClient` arguments that would route requests around the shared
 # transport stack or configure proxies outside the environment.
