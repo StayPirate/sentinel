@@ -306,7 +306,7 @@ def test_coverage_upload_job_fails_on_pull_request_error_with_pinned_cli() -> No
     assert _uses(upload_step, "codecov/codecov-action")
     assert upload_step["with"]["files"] == "backend/coverage.xml"
     assert upload_step["with"]["disable_search"] is True
-    # Fails only where the required Codecov statuses gate a merge; a push to
+    # Fails only where the required Codecov status gates a merge; a push to
     # master must not turn the CI run that gates release-please and
     # build-images red because of Codecov.
     assert upload_step["with"]["fail_ci_if_error"] == (
@@ -338,17 +338,19 @@ def test_codecov_token_is_scoped_to_coverage_upload_job() -> None:
 
 
 @pytest.mark.unit
-def test_codecov_statuses_are_informational_and_do_not_wait_for_ci() -> None:
-    # Required merge checks must never fail on coverage values nor wait on,
-    # or fail because of, other (possibly advisory) CI checks.
+def test_codecov_patch_status_is_informational_and_project_status_disabled() -> None:
+    # The required codecov/patch check must never fail on coverage values
+    # nor wait on, or fail because of, other (possibly advisory) CI checks.
+    # codecov/project is disabled explicitly: without the key, Codecov would
+    # apply its default project status, which is not informational.
     config = load_yaml_file(CODECOV_CONFIG_PATH)
     status = config["coverage"]["status"]
 
     assert config["codecov"]["require_ci_to_pass"] is False
     assert config["codecov"]["notify"]["wait_for_ci"] is False
     assert config["codecov"]["notify"]["notify_error"] is True
-    for kind in ("project", "patch"):
-        assert status[kind]["default"]["informational"] is True
+    assert status["patch"]["default"]["informational"] is True
+    assert status["project"] is False
 
 
 @pytest.mark.unit
