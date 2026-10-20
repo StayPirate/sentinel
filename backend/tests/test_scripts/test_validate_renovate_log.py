@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -26,10 +27,13 @@ Records = list[dict[str, Any]]
 def _run_validator(
     log_path: Path, *, merge_output: bool = False
 ) -> subprocess.CompletedProcess[str]:
+    # Unbuffered stdout would hide a missing flush from the ordering test.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
     return subprocess.run(
         [sys.executable, str(SCRIPT_PATH), str(log_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
+        env=env,
         text=True,
         check=False,
     )

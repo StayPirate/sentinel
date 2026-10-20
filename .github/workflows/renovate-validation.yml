@@ -61,4 +61,6 @@ jobs:
             --require-config=required \
             --onboarding=false \
             --enabled=true 2>&1 | tee "${log_file}"
-          python3 scripts/validate_renovate_log.py "${log_file}"
+          # One stream keeps the tolerated warnings (stdout) ahead of the
+          # blocking ones (stderr) in the job log.
+          python3 scripts/validate_renovate_log.py "${log_file}" 2>&1
