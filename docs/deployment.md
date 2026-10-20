@@ -614,19 +614,19 @@ own while the artifact is retained. On any other run (a push to `master` or
 a manual run) a failed upload does not fail the run, because
 `release-please.yml` and `build-images.yml` start only after a successful
 CI run on `master` and a Codecov outage must not withhold a release or
-image publication. The repository `codecov.yml`
-makes the resulting `codecov/patch` status informational — it always passes
-and is never a coverage gate (see
-`docs/features/platform/testing-strategy.md`, Coverage Policy) — and has
-Codecov publish it as soon as the upload is processed rather than waiting
-for, or failing because of, other checks. `codecov/patch` is a required
-check on `master`, so a pull request is not mergeable before its coverage
-report is visible; while Codecov cannot process uploads, merges wait until
-it recovers. `codecov.yml` disables the `codecov/project` status: the
-coverage gate already covers the whole project, and the organization's
-Codecov plan does not publish project coverage. The status is disabled
-explicitly because without its configuration Codecov would apply its
-default project status, which is not informational.
+image publication. The repository `codecov.yml` makes the resulting
+`codecov/patch` status informational — it always passes and is never a
+coverage gate (see `docs/features/platform/testing-strategy.md`, Coverage
+Policy) — and has Codecov publish it as soon as the upload is processed
+rather than waiting for, or failing because of, other checks.
+`codecov/patch` is a required check on `master`, so a pull request is not
+mergeable before its coverage report is visible; while Codecov cannot
+process uploads, merges wait until it recovers. `codecov.yml` disables the
+`codecov/project` status: the coverage gate already covers the whole
+project, and the organization's Codecov plan does not publish project
+coverage. The status is disabled explicitly because without its
+configuration Codecov would apply its default project status, which is not
+informational.
 
 **Shell inside workflows.** Shell embedded in `run:` steps follows the
 Shell Scripting rules in `docs/conventions.md` — including `actionlint`
