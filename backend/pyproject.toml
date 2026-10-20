@@ -53,11 +53,11 @@ dependencies = [
 sentinel = "app.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/StayPirate/sentinel"
-Documentation = "https://github.com/StayPirate/sentinel/tree/master/docs"
-Repository = "https://github.com/StayPirate/sentinel"
-Issues = "https://github.com/StayPirate/sentinel/issues"
-Changelog = "https://github.com/StayPirate/sentinel/blob/master/CHANGELOG.md"
+Homepage = "https://github.com/vulnwatch/sentinel"
+Documentation = "https://github.com/vulnwatch/sentinel/tree/master/docs"
+Repository = "https://github.com/vulnwatch/sentinel"
+Issues = "https://github.com/vulnwatch/sentinel/issues"
+Changelog = "https://github.com/vulnwatch/sentinel/blob/master/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
