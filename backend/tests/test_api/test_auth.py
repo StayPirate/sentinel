@@ -15,7 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import unauthenticated_error
+from app.api.dependencies import SESSION_COOKIE_NAME, unauthenticated_error
 from app.config import settings
 from app.core.enums import SessionCreationReason
 from app.core.errors import ErrorCode
@@ -135,7 +135,7 @@ class TestLogout:
         user_factory: Callable[..., Awaitable[User]],
     ) -> None:
         _session, token = await _created_session(db_session, user_factory)
-        auth_client.cookies.set("sentinel_session", token)
+        auth_client.cookies.set(SESSION_COOKIE_NAME, token)
 
         response = await auth_client.post("/api/v1/auth/logout")
 
@@ -159,7 +159,8 @@ class TestLogout:
         assert response.status_code == 204
         assert response.content == b""
         assert response.headers["set-cookie"] == (
-            "sentinel_session=; Path=/api; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
+            f"{SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; "
+            "SameSite=Strict"
         )
         await db_session.refresh(session)
         assert session.is_active is False
@@ -275,7 +276,7 @@ class TestLogout:
         authorization: str,
     ) -> None:
         _session, token = await _created_session(db_session, user_factory)
-        auth_client.cookies.set("sentinel_session", token)
+        auth_client.cookies.set(SESSION_COOKIE_NAME, token)
 
         response = await auth_client.post(
             "/api/v1/auth/logout",
@@ -291,7 +292,7 @@ class TestLogout:
         user_factory: Callable[..., Awaitable[User]],
     ) -> None:
         _session, cookie_token = await _created_session(db_session, user_factory)
-        auth_client.cookies.set("sentinel_session", cookie_token)
+        auth_client.cookies.set(SESSION_COOKIE_NAME, cookie_token)
 
         response = await auth_client.post(
             "/api/v1/auth/logout",
@@ -299,6 +300,85 @@ class TestLogout:
         )
 
         assert response.status_code == 401
+
+    async def test_cookie_with_another_name_is_not_a_credential(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+    ) -> None:
+        """authentication.md (Session cookie): logout reads the session
+        cookie like credential resolution does. Uses `client`, whose request
+        failure does not roll back the session created here."""
+        session, token = await _created_session(db_session, user_factory)
+
+        response = await client.post(
+            "/api/v1/auth/logout", headers={"cookie": f"sentinel_session={token}"}
+        )
+
+        assert response.status_code == 401
+        await db_session.refresh(session)
+        assert session.is_active is True
+
+    async def test_duplicated_session_cookie_is_rejected(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+    ) -> None:
+        """authentication.md (Logout): a session cookie that is the selected
+        source and occurs more than once returns the generic 401, even when
+        both values are valid JWTs, and invalidates neither session. Uses
+        `client`, whose request failure does not roll back the sessions
+        created here."""
+        first_session, first = await _created_session(db_session, user_factory)
+        second_session, second = await _created_session(db_session, user_factory)
+
+        cookie = f"{SESSION_COOKIE_NAME}={first}; {SESSION_COOKIE_NAME}={second}"
+
+        response = await client.post("/api/v1/auth/logout", headers={"cookie": cookie})
+
+        assert response.status_code == 401
+        assert response.json() == {
+            "code": "AUTH_NOT_AUTHENTICATED",
+            "detail": "Authentication required",
+        }
+        for session in (first_session, second_session):
+            await db_session.refresh(session)
+            assert session.is_active is True
+
+    async def test_duplicated_api_key_cookie_is_rejected_as_unauthenticated(
+        self, auth_client: AsyncClient
+    ) -> None:
+        """No credential type determination: duplicated `stl_ak_` values are
+        an invalid credential, not the API-key-specific 400."""
+        cookie = f"{SESSION_COOKIE_NAME}=stl_ak_a; {SESSION_COOKIE_NAME}=stl_ak_b"
+
+        response = await auth_client.post(
+            "/api/v1/auth/logout", headers={"cookie": cookie}
+        )
+
+        assert response.status_code == 401
+
+    async def test_valid_bearer_ignores_a_duplicated_session_cookie(
+        self,
+        auth_client: AsyncClient,
+        db_session: AsyncSession,
+        user_factory: Callable[..., Awaitable[User]],
+    ) -> None:
+        session, token = await _created_session(db_session, user_factory)
+
+        response = await auth_client.post(
+            "/api/v1/auth/logout",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "cookie": f"{SESSION_COOKIE_NAME}=a; {SESSION_COOKIE_NAME}=b",
+            },
+        )
+
+        assert response.status_code == 204
+        await db_session.refresh(session)
+        assert session.is_active is False
 
 
 @pytest.mark.e2e
@@ -321,14 +401,19 @@ class TestLogin:
         assert isinstance(body["data"]["access_token"], str)
         assert body["data"]["access_token"]
         assert body["data"]["expires_at"].endswith("Z")
-        assert response.headers["set-cookie"].startswith(
-            f"sentinel_session={body['data']['access_token']}; "
+        # authentication.md (Session cookie): exactly these attributes, so
+        # in particular `Path=/` and no `Domain`, as the `__Host-` prefix
+        # requires.
+        name_value, *attributes = (
+            part.strip() for part in response.headers["set-cookie"].split(";")
         )
-        cookie_header = response.headers["set-cookie"]
-        assert "HttpOnly" in cookie_header
-        assert "Secure" in cookie_header
-        assert "samesite=strict" in cookie_header.lower()
-        assert "Path=/api" in cookie_header
+        assert name_value == f"{SESSION_COOKIE_NAME}={body['data']['access_token']}"
+        assert {attribute.lower() for attribute in attributes} == {
+            "httponly",
+            "path=/",
+            "samesite=strict",
+            "secure",
+        }
 
     async def test_jwt_claims_match_created_session(
         self,
@@ -365,7 +450,7 @@ class TestLogin:
         `docs/features/platform/testing-strategy.md` (Optional
         authentication mandatory scenarios)."""
         user, password = await local_user_factory()
-        auth_client.cookies.set("sentinel_session", "stale-cookie-value")
+        auth_client.cookies.set(SESSION_COOKIE_NAME, "stale-cookie-value")
 
         response = await auth_client.post(
             "/api/v1/auth/login",

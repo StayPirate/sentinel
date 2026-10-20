@@ -60,7 +60,9 @@ exact origin — scheme, host, and any non-default port, without a path or
 trailing slash, for example `https://ui.example.com`. A request whose
 `Origin` header matches no entry exactly is granted no cross-origin access:
 its preflight request is rejected and no response names its origin in
-`Access-Control-Allow-Origin`.
+`Access-Control-Allow-Origin`. Cross-Origin Request Protection also trusts
+these entries for unsafe requests (`docs/features/identity/authentication.md`,
+Cross-Origin Request Protection).
 
 CORS is configured with `allow_credentials=True`, restricted methods
 (`GET`, `POST`, `PATCH`, `DELETE`), restricted headers

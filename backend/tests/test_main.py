@@ -20,7 +20,8 @@ exception. The routing and body-decoding responses are covered end to end
 in `tests/test_api/test_framework_errors.py`. Also covers the CORS
 middleware registration (`docs/configuration.md`, Application): the real
 app's options and, on a standalone app with those options, the responses
-with no configured origin, a configured origin, and an unconfigured one.
+with no configured origin, a configured origin, and an unconfigured one; and
+the registration of cross-origin request protection relative to it.
 
 A minimal standalone FastAPI app registers the real, imported handler
 function (not a re-implementation) plus one route that deliberately
@@ -63,7 +64,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import app.main as main_module
 from app.config import settings
+from app.core.cross_origin import CrossOriginProtectionMiddleware
 from app.core.errors import AppError, ErrorCode
+from app.core.middleware import RequestIDMiddleware
 from app.main import (
     _app_error_handler,
     _http_exception_handler,
@@ -458,6 +461,36 @@ class TestCorsConfiguration:
         assert preflight.status_code == 400
         assert "access-control-allow-origin" not in preflight.headers
         assert "access-control-allow-origin" not in request.headers
+
+
+@pytest.mark.unit
+class TestCrossOriginProtectionRegistration:
+    """`app.main` registers cross-origin request protection with
+    `CORS_ORIGINS`, inside `RequestIDMiddleware` and outside `CORSMiddleware`
+    (`docs/features/identity/authentication.md`, Cross-Origin Request
+    Protection; `docs/api-spec.md`, Cross-Origin Request Protection). Its
+    behavior is covered in `tests/test_core/test_cross_origin.py` and
+    `tests/test_api/test_cross_origin_protection.py`."""
+
+    def test_trusts_exactly_the_configured_origins(self) -> None:
+        registrations = [
+            kwargs
+            for cls, _, kwargs in main_module.app.user_middleware
+            if cls is CrossOriginProtectionMiddleware
+        ]
+
+        assert registrations == [{"trusted_origins": settings.cors_origins}]
+        assert registrations[0]["trusted_origins"] is settings.cors_origins
+
+    def test_runs_after_request_ids_and_before_cors(self) -> None:
+        # `user_middleware` lists the outermost middleware first.
+        classes = [cls for cls, _, _ in main_module.app.user_middleware]
+
+        assert classes == [
+            RequestIDMiddleware,
+            CrossOriginProtectionMiddleware,
+            CORSMiddleware,
+        ]
 
 
 async def _delete_default_cvss_version_setting(

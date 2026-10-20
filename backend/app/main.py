@@ -38,6 +38,7 @@ from app.api.v1 import (
 )
 from app.api.v1 import settings as settings_api
 from app.config import settings
+from app.core.cross_origin import CrossOriginProtectionMiddleware
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIDMiddleware
@@ -105,6 +106,14 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
     expose_headers=["X-Request-ID", "Retry-After"],
+)
+# The last middleware added runs first. Cross-origin request protection
+# (docs/features/identity/authentication.md, Cross-Origin Request
+# Protection) runs inside `RequestIDMiddleware`, so its rejection carries
+# `X-Request-ID` and its log record `request_id`, and before CORS, routing,
+# and every dependency (docs/api-spec.md, Cross-Origin Request Protection).
+app.add_middleware(
+    CrossOriginProtectionMiddleware, trusted_origins=settings.cors_origins
 )
 app.add_middleware(RequestIDMiddleware)
 

@@ -1,8 +1,8 @@
 """OpenAPI documentation of the global and shared responses.
 
 `docs/api-spec.md` (Global Responses, Response Applicability Derivation)
-derives these responses from an endpoint's access level and query shape, so
-endpoint error tables never repeat them. The OpenAPI document, the contract
+derives these responses from an endpoint's access level, method, and query
+shape, so endpoint error tables never repeat them. The OpenAPI document, the contract
 API clients are generated from, documents them for every operation
 (`docs/api-spec.md`, Derived Responses in the OpenAPI Document), from what
 produces them (`docs/conventions.md`, FastAPI Conventions):
@@ -15,15 +15,17 @@ produces them (`docs/conventions.md`, FastAPI Conventions):
 - `401 AUTH_NOT_AUTHENTICATED`, `403 AUTH_INSUFFICIENT_PERMISSION`, and the
   shared `400 DATE_RANGE_INVERTED` apply when an operation's dependency graph
   contains the dependency that produces them: authentication, a capability
-  check, or both date-range query parameters. `SentinelAPI` adds them to the
-  generated document (`document_dependency_responses`), so a new endpoint
+  check, or both date-range query parameters. `403
+  AUTH_CROSS_ORIGIN_REJECTED` applies to every operation whose method is
+  unsafe, whatever its access level. `SentinelAPI` adds them to the
+  generated document (`document_derived_responses`), so a new endpoint
   documents them without declaring them.
 
 A route that declares a status itself keeps its declaration, because it
 describes endpoint-specific codes for that status. For `422`, its schema
 must therefore also admit `ValidationErrorResponse`
-(`backend/tests/test_api_conventions.py`); for a dependency-derived status,
-the derived condition is appended to its description.
+(`backend/tests/test_api_conventions.py`); for a derived status, the derived
+condition is appended to its description.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from app.api.dependencies import (
     require_any_capability,
     require_capability,
 )
+from app.core.cross_origin import SAFE_METHODS
 from app.schemas.errors import ErrorResponse, ValidationErrorResponse
 
 API_V1_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
@@ -74,8 +77,8 @@ _CAPABILITY_CHECKS: Final = frozenset(
 
 @dataclass(frozen=True)
 class DerivedResponse:
-    """A dependency-derived response: its status, error code, and the
-    condition its OpenAPI description states."""
+    """A derived response: its status, error code, and the condition its
+    OpenAPI description states."""
 
     status: str
     code: str
@@ -103,6 +106,12 @@ _DATE_RANGE: Final = DerivedResponse(
     "400", "DATE_RANGE_INVERTED", "`from_date` is after `to_date`."
 )
 _DATE_RANGE_PARAMETERS: Final = frozenset({"from_date", "to_date"})
+_CROSS_ORIGIN: Final = DerivedResponse(
+    "403",
+    "AUTH_CROSS_ORIGIN_REJECTED",
+    "a browser sent the request for a page of an origin that is neither the "
+    "API's own nor a configured browser client.",
+)
 
 
 def _dependants(dependant: Dependant) -> Iterator[Dependant]:
@@ -132,11 +141,19 @@ def dependency_responses(dependant: Dependant) -> list[DerivedResponse]:
     return responses
 
 
-def document_dependency_responses(
+def method_responses(method: str) -> list[DerivedResponse]:
+    """The shared responses an operation with the HTTP method `method` can
+    return (`docs/api-spec.md`, Method Response Derivation): `403
+    AUTH_CROSS_ORIGIN_REJECTED` for every method other than `GET`, `HEAD`,
+    or `OPTIONS`."""
+    return [] if method in SAFE_METHODS else [_CROSS_ORIGIN]
+
+
+def document_derived_responses(
     openapi_schema: dict[str, Any], routes: Sequence[BaseRoute]
 ) -> None:
-    """Add to `openapi_schema`, in place, the `dependency_responses()` of
-    every documented operation of `routes`.
+    """Add to `openapi_schema`, in place, the `dependency_responses()` and
+    `method_responses()` of every documented operation of `routes`.
 
     An operation that already documents the status keeps its schema; the
     derived condition is appended to its description unless the
@@ -147,10 +164,11 @@ def document_dependency_responses(
     for context in fastapi_routing.iter_route_contexts(routes):
         if not isinstance(context.original_route, APIRoute):
             continue
-        derived = dependency_responses(context.dependant)
-        if not derived:
-            continue
+        dependency_derived = dependency_responses(context.dependant)
         for method in context.methods or ():
+            derived = dependency_derived + method_responses(method)
+            if not derived:
+                continue
             # A route excluded from the schema has no operation to document.
             operation = paths.get(context.path_format or "", {}).get(method.lower())
             if operation is None:
@@ -183,11 +201,11 @@ def document_dependency_responses(
 
 class SentinelAPI(FastAPI):
     """FastAPI, whose generated OpenAPI document also describes the
-    dependency-derived responses (`document_dependency_responses`)."""
+    derived responses (`document_derived_responses`)."""
 
     def openapi(self) -> dict[str, Any]:
         if self.openapi_schema is None:
             openapi_schema = super().openapi()
-            document_dependency_responses(openapi_schema, self.routes)
+            document_derived_responses(openapi_schema, self.routes)
             return openapi_schema
         return self.openapi_schema

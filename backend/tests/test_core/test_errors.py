@@ -241,6 +241,11 @@ class TestErrorCode:
         Error responses)."""
         assert ErrorCode.USER_SELF_ROLE_REMOVAL == "USER_SELF_ROLE_REMOVAL"
 
+    def test_cross_origin_rejection_is_registered(self) -> None:
+        """See docs/api-spec.md (Error Code Categories, Cross-Origin Request
+        Protection)."""
+        assert ErrorCode.AUTH_CROSS_ORIGIN_REJECTED == "AUTH_CROSS_ORIGIN_REJECTED"
+
     def test_self_deactivation_is_registered(self) -> None:
         """See docs/features/identity/user-management.md (Deactivate User,
         Error responses)."""

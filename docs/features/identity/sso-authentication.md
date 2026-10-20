@@ -386,9 +386,10 @@ Unlike the local login endpoint, SSO error messages can be specific
    - If `error` parameter is absent: proceed to step 8
 8. Frontend extracts `code` and `state` from URL parameters
 9. Frontend calls `POST /api/v1/auth/sso/callback` with code and state
-10. On success: the backend sets the session cookie (`sentinel_session`,
-    HttpOnly — see `docs/features/identity/authentication.md`, Token
-    Storage). The frontend then applies the post-login redirect logic
+10. On success: the backend sets the session cookie
+    (`__Host-sentinel_session`, HttpOnly — see
+    `docs/features/identity/authentication.md`, Session cookie). The
+    frontend then applies the post-login redirect logic
     (see `docs/features/identity/authentication.md` § Frontend session
     behavior)
 11. On error: display error message on login page

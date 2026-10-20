@@ -355,6 +355,19 @@ Before the first production deployment:
 - [ ] DNS configured for `sentinel.suse.de`
 - [ ] TLS certificate provisioned for `sentinel.suse.de`
 - [ ] Reverse proxy / ingress configured to route `/api` to backend
+- [ ] Reverse proxy / ingress forwards the `Host`, `Origin`, and
+      `Sec-Fetch-Site` request headers to the backend unchanged
+      (`docs/features/identity/authentication.md`, Cross-Origin Request
+      Protection). Verified through the public hostname: `POST
+      /api/v1/auth/logout` without credentials returns
+      `403 AUTH_CROSS_ORIGIN_REJECTED` with `Sec-Fetch-Site: cross-site`, and
+      with only `Origin: https://other.example`, and returns
+      `401 AUTH_NOT_AUTHENTICATED` with only an `Origin` naming the public
+      hostname
+- [ ] No component serving the Sentinel host (reverse proxy, ingress, UI
+      server) logs the `Cookie` request header, which carries the session
+      token on every path (`docs/features/identity/authentication.md`,
+      Session cookie)
 - [ ] Rate limiting configured on the reverse proxy for public authentication
       endpoints (see issue #682)
 - [ ] CORS origins set correctly

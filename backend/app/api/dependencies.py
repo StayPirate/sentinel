@@ -25,7 +25,14 @@ from fastapi import Depends, Path, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
-from app.core.credentials import API_KEY_PREFIX, extract_credential
+from app.core.credentials import (
+    API_KEY_PREFIX,
+    DuplicateSessionCookie,
+    extract_credential,
+)
+from app.core.credentials import (
+    SESSION_COOKIE_NAME as SESSION_COOKIE_NAME,
+)
 from app.core.enums import ApiKeyRejectionReason, Capability, CredentialKind, Role
 from app.core.errors import AppError, ErrorCode
 from app.core.exceptions import CVENotFoundError, TicketNotFoundError
@@ -46,12 +53,6 @@ from app.services.ticket_service import ResolvedTicket
 from app.services.ticket_visibility import ANONYMOUS_CALLER, TicketCaller
 
 logger = structlog.get_logger(__name__)
-
-# The session cookie name and attributes are shared by every code path
-# that sets or reads it: the login endpoint (`app/api/v1/auth.py`),
-# this module's sliding-refresh attachment, and the logout endpoint's
-# clearing header. Centralized here so all three stay in sync.
-SESSION_COOKIE_NAME = "sentinel_session"
 
 
 def unauthenticated_error() -> AppError:
@@ -211,12 +212,15 @@ def resource_not_found_error() -> AppError:
 
 
 def set_session_cookie(response: Response, token: str) -> None:
-    """Set the `sentinel_session` cookie with the approved secure attributes.
+    """Set the session cookie with the approved secure attributes.
 
     Shared by the login endpoint (initial issuance) and this module's
     sliding-refresh attachment — see
-    `docs/features/identity/authentication.md` (Frontend session
-    behavior, Token refresh) for the attribute rationale.
+    `docs/features/identity/authentication.md` (Session cookie) for the
+    attributes and their rationale: the `__Host-` name prefix requires
+    `Secure`, `Path=/`, and no `Domain`, which `set_cookie()` omits by
+    default. The logout endpoint's clearing header
+    (`app/api/v1/auth.py`) must stay in sync with these attributes.
     """
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
@@ -224,7 +228,7 @@ def set_session_cookie(response: Response, token: str) -> None:
         httponly=True,
         secure=True,
         samesite="strict",
-        path="/api",
+        path="/",
     )
 
 
@@ -564,17 +568,24 @@ async def _resolve_principal(
     validation path and differ only in how they handle the `None`
     case — they must never diverge on validation behavior or
     successful-authentication side effects. `Authorization: Bearer`
-    takes precedence over the `sentinel_session` cookie; JWT-vs-API-key
-    dispatch uses the `stl_ak_` prefix; any selected-but-rejected
-    credential raises the generic 401 (never converted to `None` here);
-    and JWT requests receive the sliding refresh evaluation.
+    takes precedence over the session cookie, which is read from the raw
+    `Cookie` header (`extract_credential()`; Starlette's own cookie parser
+    strips characters such as U+00A0 from cookie names, which would let a
+    planted cookie match the name); a duplicated session cookie is
+    rejected before any type determination, lookup, or log record;
+    JWT-vs-API-key dispatch uses the `stl_ak_` prefix; any
+    selected-but-rejected credential raises the generic 401 (never
+    converted to `None` here); and JWT requests receive the sliding
+    refresh evaluation.
     """
     credential = extract_credential(
         request.headers.get("authorization"),
-        request.cookies.get(SESSION_COOKIE_NAME),
+        request.headers.get("cookie"),
     )
     if credential is None:
         return None
+    if isinstance(credential, DuplicateSessionCookie):
+        raise unauthenticated_error()
 
     now = datetime.now(UTC)
     if credential.startswith(API_KEY_PREFIX):

@@ -3,7 +3,8 @@
 
 See `docs/api-spec.md` (Global Responses, Response Applicability
 Derivation). Every case builds a standalone `SentinelAPI` whose routes use
-the real authentication and capability dependencies; only the generated
+the real authentication and capability dependencies and the methods that
+derive the cross-origin rejection; only the generated
 document is inspected, so no request runs. The registered application is
 covered by the structural tests in `tests/test_api_conventions.py` and by
 the OpenAPI response contract check over every test request
@@ -34,6 +35,10 @@ _REQUIRED_401 = (
 )
 _OPTIONAL_401 = "`AUTH_NOT_AUTHENTICATED`: a credential was sent and is invalid."
 _403 = "`AUTH_INSUFFICIENT_PERMISSION`: the caller lacks the required capability."
+_CROSS_ORIGIN_403 = (
+    "`AUTH_CROSS_ORIGIN_REJECTED`: a browser sent the request for a page of an "
+    "origin that is neither the API's own nor a configured browser client."
+)
 _400 = "`DATE_RANGE_INVERTED`: `from_date` is after `to_date`."
 
 
@@ -55,6 +60,37 @@ def _build_app(*, include_v1_responses: bool = True) -> SentinelAPI:
     @router.get("/public")
     async def public() -> None:
         """No credential processing."""
+
+    @router.post("/public-action")
+    async def public_post() -> None:
+        """No credential processing, with an unsafe method."""
+
+    @router.patch("/public-action")
+    async def public_patch() -> None:
+        """No credential processing, with an unsafe method."""
+
+    @router.delete("/public-action")
+    async def public_delete() -> None:
+        """No credential processing, with an unsafe method."""
+
+    @router.put("/public-action")
+    async def public_put() -> None:
+        """No credential processing, with a method no Sentinel endpoint
+        uses: the derivation covers every method other than the safe ones."""
+
+    @router.post(
+        "/own-403-action",
+        responses={
+            403: {"model": ErrorResponse, "description": "`AUTH_SESSION_REQUIRED`."}
+        },
+    )
+    async def own_403_action(
+        principal: Annotated[
+            AuthenticatedPrincipal,
+            Depends(require_capability(Capability.MANAGE_USERS)),
+        ],
+    ) -> None:
+        """A route-level 403 on an unsafe method."""
 
     @router.get("/optional")
     async def optional(principal: OptionalCurrentUser) -> None:
@@ -159,14 +195,23 @@ class TestDependencyDerivedResponses:
             pytest.param(
                 "post",
                 "/capability",
-                {"401": _REQUIRED_401, "403": _403},
+                {"401": _REQUIRED_401, "403": f"{_403} {_CROSS_ORIGIN_403}"},
                 id="capability",
             ),
             pytest.param(
                 "post",
                 "/any-capability",
-                {"401": _REQUIRED_401, "403": _403},
+                {"401": _REQUIRED_401, "403": f"{_403} {_CROSS_ORIGIN_403}"},
                 id="any-capability",
+            ),
+            *(
+                pytest.param(
+                    method,
+                    "/public-action",
+                    {"403": _CROSS_ORIGIN_403},
+                    id=f"public-{method}",
+                )
+                for method in ("post", "patch", "delete", "put")
             ),
             pytest.param("get", "/date-range", {"400": _400}, id="date-range"),
             pytest.param("get", "/lower-bound", {}, id="one-date-parameter"),
@@ -198,6 +243,16 @@ class TestDependencyDerivedResponses:
 
         assert responses["403"] == {
             "description": f"`AUTH_SESSION_REQUIRED`. {_403}",
+            "content": {"application/json": {"schema": _ERROR_REF}},
+        }
+
+    def test_route_level_status_on_an_unsafe_method_gains_both_conditions(
+        self,
+    ) -> None:
+        responses = _responses(_build_app(), "post", "/own-403-action")
+
+        assert responses["403"] == {
+            "description": f"`AUTH_SESSION_REQUIRED`. {_403} {_CROSS_ORIGIN_403}",
             "content": {"application/json": {"schema": _ERROR_REF}},
         }
 

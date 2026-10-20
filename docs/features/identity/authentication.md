@@ -13,8 +13,9 @@ presents on subsequent requests. Programmatic clients may instead present API
 keys managed under `docs/features/identity/api-key-management.md`.
 
 This specification defines the shared infrastructure consumed by both
-providers: token format, session management, credential validation,
-middleware behavior, and session UI surfaces.
+providers: token format, session management, the session cookie, credential
+validation, cross-origin request protection, middleware behavior, and session
+UI surfaces.
 
 ## Architecture
 
@@ -155,8 +156,8 @@ that transparently extends the token lifetime for active users:
    b. If the capped expiration is not later than `now`, do not refresh.
       Otherwise, generate a new JWT with the same `sub`, `session_id`, and
       `session_deadline`, but new `iat = now` and new `exp`
-   c. Set the new JWT in the response `Set-Cookie` header (same cookie
-      attributes: `HttpOnly`, `SameSite=Strict`, `Secure`, `Path=/api`)
+   c. Set the new JWT as the session cookie in the response `Set-Cookie`
+      header (see Session cookie)
 4. If `token_age < refresh_threshold`: do nothing (normal request flow)
 
 The refresh is completely server-side and transparent to the client. No
@@ -174,10 +175,10 @@ client-side logic or dedicated refresh endpoint is required.
   not modified)
 - Refresh delivery is identical whether the validated JWT came from the
   session cookie or a Bearer header: the renewed JWT is emitted as the
-  `sentinel_session` cookie. A Bearer client that does not retain and send that
-  cookie continues presenting its original token and must re-authenticate when
-  that token reaches `exp`; programmatic clients that need non-session
-  credentials should use API keys
+  `__Host-sentinel_session` cookie. A Bearer client that does not retain and
+  send that cookie continues presenting its original token and must
+  re-authenticate when that token reaches `exp`; programmatic clients that
+  need non-session credentials should use API keys
 - When multiple requests arrive simultaneously after the refresh
   threshold, each independently issues a new JWT. This is intentionally
   accepted: all resulting tokens reference the same valid session, no
@@ -294,6 +295,36 @@ state — before calling it; a provider that authenticates a local password
 additionally passes the verified `password_hash` as `expected_password_hash`
 for the locked revalidation above. Session creation produces no
 `IdentityAuditEvent`.
+
+### Session cookie
+
+A browser session carries its JWT in the session cookie, which the login
+endpoints and the sliding refresh set and the logout endpoint clears. The
+cookie is named `__Host-sentinel_session` and has the attributes `HttpOnly`,
+`Secure`, `SameSite=Strict`, and `Path=/`, and no `Domain` attribute.
+
+Credential selection (Shared Credential Resolution) reads the first `Cookie`
+request header field, splits it on `;` into pairs, and removes only the spaces
+and horizontal tabs around each pair. A pair's name is the text before its
+first `=` and its value the rest, used without unquoting or other decoding; a
+segment without `=` has no name. Only a pair whose name is exactly
+`__Host-sentinel_session` is considered, so a pair with any other name is
+ignored: for example `sentinel_session`, the same name with a differently
+capitalized prefix, or the name preceded by another whitespace octet such as
+`0x85` or `0xA0`. When the cookie is the selected credential source and its
+name occurs more than once, the request carries an invalid credential: a
+browser that enforces the prefix sends at most one such cookie, so a second
+one was planted.
+
+A browser accepts a cookie whose name starts with `__Host-` only from a
+secure origin, with `Secure` and `Path=/`, and without `Domain`, so only the
+API host itself can set it. A page on another host of the same site therefore
+cannot plant a cookie of that name to replace the user's session with another
+one or with an invalid value. `Path=/` is required by the prefix; within the
+API's origin a narrower path would isolate nothing in the browser. The browser
+consequently sends the cookie with every request to the API host, including
+requests that another component behind the same host serves, which must not
+log it (`docs/deployment.md`, Pre-Production Checklist).
 
 ### Session liveness check
 
@@ -616,8 +647,9 @@ respective specs.
 
 After a successful login (regardless of provider):
 
-1. The backend sets the session cookie (`sentinel_session`, HttpOnly) —
-   the frontend does not handle the token directly
+1. The backend sets the session cookie (`__Host-sentinel_session`,
+   HttpOnly — see Session cookie) — the frontend does not handle the token
+   directly
 2. The frontend checks `sessionStorage` for `sentinel_return_url`:
    - If present: redirect to that URL and remove the key
    - If absent: redirect to the dashboard
@@ -628,7 +660,7 @@ After a successful login (regardless of provider):
 #### Session expiration handling
 
 When any API call returns HTTP 401 and the user previously had an active
-session (the browser was sending the `sentinel_session` cookie):
+session (the browser was sending the `__Host-sentinel_session` cookie):
 
 1. Redirect to the login page
 2. Display an informational message: "Your session has expired. Please
@@ -689,10 +721,15 @@ validation contract:
    - If the value uses any other scheme or has no parseable scheme, treat it
      as header absent and proceed to step 2.
 2. If the `Authorization` header is absent, check for the session cookie
-   (`sentinel_session`):
+   (`__Host-sentinel_session`, read as defined in Session cookie; a cookie
+   with any other name is not considered):
+   - If the cookie occurs more than once: an invalid credential is selected.
+     The request receives the generic 401 of step 4 without credential type
+     determination, lookup, or log record.
    - If the cookie has a non-empty value: extract its value as the token and go
      to step 3. A whitespace-only value is non-empty and therefore selects an
-     invalid credential rather than anonymous access.
+     invalid credential rather than anonymous access (after parsing, a value
+     of only spaces and horizontal tabs is empty).
    - If the cookie is absent or empty: no credential is selected. The
      dependency-specific behavior below applies.
 3. Determine credential type:
@@ -942,6 +979,86 @@ independently — `require_session_authentication()` does not check
 capabilities, and `require_capability()` does not check credential
 kind.
 
+## Cross-Origin Request Protection
+
+`SameSite=Strict` withholds the session cookie only from cross-site requests.
+A page on another host of the API's registrable domain, such as any
+`https://*.suse.de` host or another Sentinel environment, is same-site: the
+browser attaches the cookie to the requests that the page initiates, and an
+HTML form can send a `POST` without a CORS preflight. The application
+therefore rejects every unsafe request that a browser sends for a page of
+another origin, unless that origin is a configured browser client.
+
+### Scope
+
+The protection applies to every request whose method is not `GET`, `HEAD`,
+or `OPTIONS`, on every path, whatever credential it carries, if any. A
+request with one of these safe methods is never rejected: no operation changes
+state through them (`docs/api-spec.md`, Mutation Patterns), and a CORS
+preflight request uses `OPTIONS`.
+
+### Decision
+
+The decision reads the first occurrence of the request's `Origin`,
+`Sec-Fetch-Site`, and `Host` headers and applies these rules in order:
+
+1. If `Origin` equals an entry of `CORS_ORIGINS` (`docs/configuration.md`)
+   exactly, accept.
+2. If `Sec-Fetch-Site` is present and not empty, accept when its value is
+   exactly `same-origin` or `none`, and reject any other value, including
+   `same-site`, `cross-site`, and a value the Fetch Metadata specification
+   does not define.
+3. If `Origin` is absent or empty, accept.
+4. Accept when `Origin` is exactly `scheme://host` or `scheme://host:port`,
+   with a non-empty host and no user information, path (not even `/`),
+   query, or fragment, and its host, followed by `:port` when the value
+   states a port, equals `Host` compared ASCII case-insensitively. Reject
+   every other case, including `null` and a request without `Host`.
+   Forwarded headers such as `X-Forwarded-Host` and `Forwarded` are not
+   consulted, and the scheme is not compared because TLS can end before the
+   application.
+
+Every current major browser sends `Sec-Fetch-Site`, which a page can neither
+set nor remove, and its value distinguishes a page of the API's own origin,
+scheme included, from a same-site page. Rule 4 covers a browser that sends
+only `Origin`. A request with neither header comes from a client that is not
+a browser, or from a browser too old to send either, which this protection
+cannot cover. Consequently:
+
+- a browser client served from the API's origin needs no configuration;
+- a browser client served from another origin, same-site or cross-site, needs
+  its origin listed in `CORS_ORIGINS`, as it does to read responses; and
+- clients that are not browsers, such as Bearer JWT and API key clients, are
+  unaffected.
+
+### Rejection
+
+A rejected request receives `403 AUTH_CROSS_ORIGIN_REJECTED` with detail
+`"Cross-origin request not allowed."` in the standard error envelope. The
+decision precedes routing (`docs/api-spec.md`, Cross-Origin Request
+Protection), so a rejected request has no effect: its body is not read, no
+credential is selected or validated, no session is refreshed or invalidated,
+no API key `last_used_at` is touched, no login lockout counter changes, and no
+operation, audit event, or post-commit effect occurs. The response sets no
+cookie.
+
+Each rejection emits one `cross_origin_request_rejected` WARNING with
+`method`, the request method, and `reason`: `sec_fetch_site` when rule 2
+rejects, or `origin` when rule 4 rejects. The record carries the request's
+`request_id` and no other request data — neither header value, the path, nor
+any credential — because an `Origin` value can be an IP address and a path
+can contain a username (`docs/features/platform/logging.md`, Secrets and PII
+Discipline).
+
+### Deployment Requirement
+
+The decision relies on the `Host`, `Origin`, and `Sec-Fetch-Site` request
+headers reaching the application as the browser sent them, so a reverse proxy
+or ingress in front of the API forwards them unchanged (`docs/deployment.md`,
+Pre-Production Checklist). A proxy that removes `Origin` and `Sec-Fetch-Site`
+disables the protection without any error, and one that rewrites `Host`
+makes rule 4 reject legitimate requests.
+
 ## API Endpoints
 
 ### Get Current User
@@ -1002,13 +1119,15 @@ calling it multiple times (e.g., retry or double-click) always succeeds.
 
 The lightweight dependency uses the same credential-source precedence as
 `get_current_user`: a non-empty `Authorization: Bearer` value takes precedence
-over the `sentinel_session` cookie; an absent or whitespace-only bearer value
-falls back to the cookie. It does not fall back to a valid cookie after a
-non-empty bearer credential fails. A selected credential beginning with
-`stl_ak_` produces the API-key-specific 400 response below.
+over the `__Host-sentinel_session` cookie; an absent or whitespace-only bearer
+value falls back to the cookie. It does not fall back to a valid cookie after a
+non-empty bearer credential fails. It reads the cookie as defined in Session
+cookie. A selected credential beginning with `stl_ak_` produces the
+API-key-specific 400 response below.
 
-If the token is not a valid JWT (invalid signature, malformed), return
-HTTP 401 with code `AUTH_NOT_AUTHENTICATED` and body
+If the token is not a valid JWT (invalid signature, malformed), or the
+session cookie is the selected source and occurs more than once, return HTTP
+401 with code `AUTH_NOT_AUTHENTICATED` and body
 `{"code": "AUTH_NOT_AUTHENTICATED", "detail": "Authentication required"}`.
 This endpoint does not use `get_current_user` and therefore handles
 authentication failure directly (same response format for client
@@ -1037,8 +1156,8 @@ code `AUTH_LOGOUT_NOT_APPLICABLE` and message:
 4. After the transaction commits, execute the post-commit phase:
    `session_service.purge_session_cache([session_id])` (best-effort
    cache purge — see Session invalidation above)
-5. Set a `Set-Cookie` header that clears the `sentinel_session` cookie:
-   `Set-Cookie: sentinel_session=; Path=/api; Max-Age=0; HttpOnly; Secure; SameSite=Strict`
+5. Set a `Set-Cookie` header that clears the session cookie:
+   `Set-Cookie: __Host-sentinel_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`
 6. Return HTTP 204
 
 ## Security Considerations
@@ -1072,14 +1191,24 @@ code `AUTH_LOGOUT_NOT_APPLICABLE` and message:
   invalidate the Sentinel session. This is a known limitation,
   acceptable for an internal tool. Users can log out of Sentinel
   explicitly.
-- **Token in browser storage**: the JWT is stored in an `HttpOnly`
-  cookie named `sentinel_session` with `SameSite=Strict`, `Secure`
-  (HTTPS only), and `Path=/api`. This makes the token immune to XSS
-  attacks (JavaScript cannot access HttpOnly cookies). The frontend
-  does not handle the token directly — the browser attaches it
-  automatically to every request to the same origin. `SameSite=Strict`
-  prevents the cookie from being sent on cross-origin requests,
-  eliminating the need for a separate CSRF token mechanism.
+- **Token in browser storage**: the JWT is stored in the session cookie
+  (see Session cookie). `HttpOnly` keeps the token out of reach of scripts,
+  so an injected script cannot read or exfiltrate it; it does not stop a
+  script injected into the API's origin from sending authenticated requests,
+  which no request-forgery defense prevents. The frontend does not handle the
+  token directly — the browser attaches the cookie to the requests sent to
+  the API host by pages of the same site. `SameSite=Strict` withholds it from
+  cross-site requests only, so pages on other hosts of the same site remain
+  able to trigger authenticated requests and to set cookies: Cross-Origin
+  Request Protection rejects their unsafe requests, and the `__Host-` prefix
+  prevents them from replacing the session cookie. Both rely on the browser:
+  one that sends neither `Sec-Fetch-Site` nor `Origin` with an unsafe
+  request, or that does not enforce cookie prefixes, leaves users unprotected
+  against pages on other hosts of the same site; every current major browser
+  does both. A page on another host of the same site can still log a user
+  out, for example by planting a second cookie with the session cookie's name
+  in such a browser or by overflowing the browser's cookie storage for the
+  domain, which evicts the session cookie in any browser.
 - **No concurrent session limit**: there is no enforced maximum number
   of active sessions per user. Users may have sessions on multiple
   devices simultaneously. This is a deliberate choice for an internal
@@ -1113,9 +1242,10 @@ code `AUTH_LOGOUT_NOT_APPLICABLE` and message:
   - The tool operates on a trusted internal network, reducing the attack
     surface for cookie theft
   - Existing compensating controls: `Secure` flag (HTTPS only), `HttpOnly`
-    (no XSS access), `SameSite=Strict` (no cross-origin leakage),
-    maximum session lifetime (`SESSION_MAX_LIFETIME_DAYS`), admin
-    deactivation (invalidates all sessions immediately)
+    (no script access to the token), `SameSite=Strict` (not sent with
+    cross-site requests), maximum session lifetime
+    (`SESSION_MAX_LIFETIME_DAYS`), admin deactivation (invalidates all
+    sessions immediately)
   - Detection of session theft is not a goal for this tool; prevention
     via the cookie flags above is the primary defense
 - **OIDC state parameter not single-use (accepted risk)**: the OIDC
@@ -1130,6 +1260,8 @@ code `AUTH_LOGOUT_NOT_APPLICABLE` and message:
 ## Cross-references
 
 - `docs/api-spec.md` — API conventions, global responses, scoped responses
+- `docs/configuration.md` — `CORS_ORIGINS`, the browser clients accepted by
+  Cross-Origin Request Protection
 - `docs/features/identity/api-key-management.md` — API key lifecycle,
   endpoints, CLI commands, status, and retention
 - `docs/features/identity/api-key-service.md` — centralized API key
