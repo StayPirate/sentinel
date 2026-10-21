@@ -95,11 +95,41 @@
     },
     {
       "customType": "regex",
-      "description": "Codecov CLI version pinned through the version: input of codecov/codecov-action, which the github-actions manager does not track",
-      "managerFilePatterns": ["/.github/workflows/ci\\.yml$/"],
+      "description": "Action version: inputs that the github-actions manager does not track (e.g. the Codecov CLI of codecov/codecov-action), each marked by a '# renovate: datasource=<datasource> depName=<name>' hint comment directly above it",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
         "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>\\S+)\\s+version:\\s*\"(?<currentValue>[^\"]+)\""
       ]
+    },
+    {
+      "customType": "regex",
+      "description": "Tool versions that a workflow downloads itself (e.g. shellcheck, shfmt, and actionlint in ci.yml), each marked by a '# renovate: datasource=<datasource> depName=<name>' hint comment directly above its <NAME>_VERSION: \"<version>\" env: entry",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>\\S+)\\s+[A-Z0-9_]+_VERSION:\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      // Release tags carry a 'v' prefix (v1.7.12) that the values omit,
+      // because the download URLs add it; tags that are not versions
+      // (shellcheck's 'latest' and 'stable') are dropped.
+      "extractVersionTemplate": "^v?(?<version>\\d.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Python tools run as 'uvx <package>@<version>' (bandit and pip-audit in ci.yml, and the bandit copy of the Makefile security target)",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/", "/^Makefile$/"],
+      "matchStrings": [
+        "uvx\\s+(?<depName>[A-Za-z0-9][A-Za-z0-9._-]*)@(?<currentValue>[^\\s\"']+)"
+      ],
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "description": "Browser assets that a workflow loads from unpkg (the Swagger UI of deploy-api-docs.yml) — Renovate's cdnurl and html managers support cdnjs only",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "https://unpkg\\.com/(?<depName>(?:@[a-z0-9._-]+/)?[a-z0-9._-]+)@(?<currentValue>[^/\\s\"']+)/"
+      ],
+      "datasourceTemplate": "npm"
     }
   ],
   "packageRules": [
@@ -127,8 +157,9 @@
       "commitMessagePrefix": "ci(deps):"
     },
     {
-      "description": "Codecov CLI version used by the ci.yml coverage-upload job",
-      "matchPackageNames": ["codecov/codecov-cli"],
+      "description": "Versions that the custom managers track in the workflows, in .github/sbom-tools.env, and in the Makefile — tools used only by CI and by the developer's local checks",
+      "matchManagers": ["custom.regex"],
+      "matchFileNames": [".github/**", "Makefile"],
       "commitMessagePrefix": "ci(deps):"
     },
     {

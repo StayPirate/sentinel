@@ -89,6 +89,10 @@ Simpler development-stack commands use that same supported baseline. See
 `docs/features/platform/testing-strategy.md` (Image / Container Smoke Testing)
 for the full justification.
 
+Renovate proposes updates of the `shellcheck`, `shfmt`, and `actionlint`
+versions that `ci.yml` pins (see [Workflow Conventions](#workflow-conventions));
+after such an update is merged, update the local tools to match.
+
 ### Network Access (Staging/Production)
 
 Sentinel requires outbound access to:
@@ -443,25 +447,56 @@ references (`@main`, `@master`, any branch name) and tag references
 force-moved by the upstream maintainer to point at different content
 without the repository owner's action; a commit SHA cannot.
 
-The same principle applies to tools a workflow installs itself — whether
-downloaded directly or requested through an action's `version:` input.
-Their versions MUST be pinned explicitly and MUST NOT be left to resolve
-to the latest available release.
+The same principle applies to every other tool a workflow uses — whether
+downloaded directly, run through `uvx`, loaded from a CDN, run as a
+container image, or requested through an action's `version:` input. Their
+versions MUST be pinned explicitly and MUST NOT be left to resolve to the
+latest available release. Every pinned version MUST also be tracked by
+Renovate, in one of the forms below, so that a new release is proposed
+instead of the pin aging unnoticed; a pin that none of these forms can
+express carries a comment beside it stating why it is updated manually.
 
-Renovate (`renovate.jsonc`, `github-actions` manager) tracks the
-SHA-pinned actions and opens a PR bumping both the SHA and the
-trailing version comment when a new release is published. It also
-tracks `with:` version inputs of commonly used community-maintained
-actions (e.g. `astral-sh/setup-uv`'s `version:` input) — no additional
-configuration is required for either pinning style. A `version:` input the
-manager does not support (such as `codecov/codecov-action`'s) is tracked by
-a `renovate.jsonc` custom manager matching a
-`# renovate: datasource=<datasource> depName=<name>` hint comment placed
-directly above it. Dependency updates are managed by the hosted Mend
-Renovate GitHub App reading `renovate.jsonc` from the repository root; no
-workflow in this repository runs the hosted bot or creates its
-dependency-update PRs. The separate advisory validation workflow is
-described below.
+Dependency updates are managed by the hosted Mend Renovate GitHub App
+reading `renovate.jsonc` from the repository root; no workflow in this
+repository runs the hosted bot or creates its dependency-update PRs. The
+separate advisory validation workflow is described below. In the
+workflows and the files they read, Renovate tracks:
+
+- **Actions**, through the `github-actions` manager, which opens a PR
+  bumping both the SHA and the trailing version comment when a new release
+  is published. The same manager tracks the `with:` version inputs of
+  commonly used community-maintained actions (e.g. `astral-sh/setup-uv`'s
+  `version:` input) and the images of `services:` containers, with no
+  additional configuration.
+- **Other action `version:` inputs** (such as `codecov/codecov-action`'s),
+  through a custom manager matching a
+  `# renovate: datasource=<datasource> depName=<name>` hint comment placed
+  directly above the input.
+- **Downloaded tools** (`shellcheck`, `shfmt`, and `actionlint` in the
+  `Shell Lint` job of `ci.yml`), through a custom manager matching the same
+  hint comment placed directly above a `<NAME>_VERSION: "<version>"` entry
+  of an `env:` block, for example
+  `# renovate: datasource=github-releases depName=rhysd/actionlint`. The
+  value omits the `v` prefix of the release tag, which the download URL
+  adds; the manager strips that prefix from the releases it looks up and
+  ignores tags that are not versions.
+- **Python tools run as `uvx <package>@<version>`** (`bandit` and
+  `pip-audit` in `ci.yml`, and the `bandit` copy of the `Makefile`
+  `security` target), through a custom manager that looks the package up
+  on PyPI. Copies of the same pin are updated in one PR.
+- **Browser assets loaded from `https://unpkg.com/<package>@<version>/`**
+  (the Swagger UI of `deploy-api-docs.yml`), through a custom manager that
+  looks the package up on npm.
+- **Container images pinned by version and digest** (the Renovate image of
+  `renovate-validation.yml`, and the Syft and CycloneDX CLI images of
+  `.github/sbom-tools.env`), through a custom manager per image.
+
+A new pin uses one of these forms, so that Renovate tracks it from the
+start; a tool a workflow downloads is pinned through a hinted `env:` entry.
+Updates of the dependencies that these custom managers find under
+`.github/` or in the `Makefile` use the `ci(deps):` title prefix, like
+GitHub Actions updates, and each tool gets its own PR. The `ci` type
+carries no release signal (`docs/conventions.md`, Versioning).
 
 `renovate-validation.yml` is a separate, advisory repository check. It runs
 on every pull request rather than maintaining a whitelist of Renovate-managed
