@@ -490,6 +490,10 @@ workflows and the files they read, Renovate tracks:
 - **Container images pinned by version and digest** (the Renovate image of
   `renovate-validation.yml`, and the Syft and CycloneDX CLI images of
   `.github/sbom-tools.env`), through a custom manager per image.
+- **Images of the Compose files and the Dockerfile** that a workflow starts
+  or builds (for example `docker-compose.smoke.yml` and `backend/Dockerfile`
+  in the image smoke gate), through the built-in `docker-compose` and
+  `dockerfile` managers (see Container Build Conventions).
 
 A new pin uses one of these forms, so that Renovate tracks it from the
 start; a tool a workflow downloads is pinned through a hinted `env:` entry.

@@ -52,6 +52,10 @@ SWAGGER_UI_ASSET = re.compile(
 )
 
 
+def _workflow_files() -> list[Path]:
+    return sorted({*WORKFLOWS_DIR.glob("*.yml"), *WORKFLOWS_DIR.glob("*.yaml")})
+
+
 def _uvx_pins(text: str) -> list[tuple[str, str]]:
     """The (package, version) pin of every `uvx` invocation in `text`; an
     invocation that is not `uvx <package>@<exact version>` fails."""
@@ -92,7 +96,7 @@ def test_uvx_tools_are_pinned_exactly_and_makefile_copy_matches_ci() -> None:
     # tracking. The Makefile security target matches the CI bandit pin.
     workflow_pins = [
         pin
-        for path in sorted(WORKFLOWS_DIR.glob("*.yml"))
+        for path in _workflow_files()
         for value in string_values(load_yaml_file(path))
         for pin in _uvx_pins(value)
     ]
