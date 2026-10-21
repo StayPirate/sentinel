@@ -236,9 +236,15 @@ jobs:
     name: Shell Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Each hint comment is read by a renovate.jsonc custom manager; the
+    # values omit the v prefix of the release tags, which the download
+    # URLs below add. See docs/deployment.md (Workflow Conventions).
     env:
+      # renovate: datasource=github-releases depName=koalaman/shellcheck
       SHELLCHECK_VERSION: "0.11.0"
+      # renovate: datasource=github-releases depName=mvdan/sh
       SHFMT_VERSION: "3.13.1"
+      # renovate: datasource=github-releases depName=rhysd/actionlint
       ACTIONLINT_VERSION: "1.7.12"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
