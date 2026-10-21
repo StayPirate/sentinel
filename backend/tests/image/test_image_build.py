@@ -10,7 +10,15 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.image.conftest import ImageSmokeContext
+
 PYPROJECT_PATH = Path(__file__).resolve().parents[2] / "pyproject.toml"
+
+# The numeric runtime user and group of every role (docs/deployment.md,
+# Container Build Conventions).
+_RUNTIME_UID = "1000"
+_RUNTIME_GID = "1000"
+_INSPECT_TIMEOUT = 30.0
 
 _RUNTIME_MANIFEST_SCRIPT = """
 import shutil
@@ -74,13 +82,46 @@ def test_default_api_command_serves_health_readiness_and_openapi(
 
 
 @pytest.mark.image
+def test_image_declares_a_numeric_non_root_user(
+    image_smoke_context: ImageSmokeContext,
+) -> None:
+    """The configured user is numeric, so an orchestrator can verify non-root.
+
+    Kubernetes rejects ``runAsNonRoot`` for an image whose user is a name and
+    whose pod sets no numeric ``runAsUser``.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{.Config.User}}",
+                image_smoke_context.image_id,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_INSPECT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"docker image inspect timed out after {exc.timeout}s")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"{_RUNTIME_UID}:{_RUNTIME_GID}"
+
+
+@pytest.mark.image
 def test_runtime_manifest_is_complete_non_root_and_excludes_test_code(
     compose_exec: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
     """Inspect the physical contents and metadata unique to the OCI artifact."""
-    user = compose_exec("api", "id", "-u")
-    assert user.returncode == 0, user.stderr
-    assert user.stdout.strip() != "0", "runtime image executes as root"
+    for flag, expected in (("-u", _RUNTIME_UID), ("-g", _RUNTIME_GID)):
+        identity = compose_exec("api", "id", flag)
+        assert identity.returncode == 0, identity.stderr
+        assert identity.stdout.strip() == expected, (
+            f"id {flag} returned {identity.stdout.strip()!r}, expected {expected}"
+        )
 
     result = compose_exec("api", "python", "-c", _RUNTIME_MANIFEST_SCRIPT)
     assert result.returncode == 0, (

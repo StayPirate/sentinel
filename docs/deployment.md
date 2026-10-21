@@ -49,6 +49,7 @@ For architectural decisions and design constraints, see
   - [Timezone and Locale Requirements](#timezone-and-locale-requirements)
   - [Python Interpreter Limits](#python-interpreter-limits)
   - [Clock Synchronization](#clock-synchronization)
+  - [Kubernetes Workloads](#kubernetes-workloads)
 - [Operations](#operations)
   - [Database Migrations](#database-migrations)
   - [CLI Operational Access](#cli-operational-access)
@@ -284,11 +285,12 @@ cd backend && uv run python -m app.cli manage-user create \
 
 #### Staging-Specific Notes
 
-- Staging auto-deployment from the `master` branch is deferred until
-  the deployment target (Kubernetes, Docker Compose on VM, or cloud
-  service) is decided. The current process is manual. When the target
-  is known, a deployment workflow will be added to the CI pipeline
-  following [Workflow Conventions](#workflow-conventions)
+- Staging and production run on Kubernetes. Their environment
+  configuration is maintained outside this repository; this repository
+  publishes the image and documents the runtime requirements that every
+  deployment meets (see
+  [Kubernetes Workloads](#kubernetes-workloads)). No workflow in this
+  repository deploys an environment
 - IBS/RabbitMQ integration is active — staging receives real events
 - Run the IBS RabbitMQ consumer as its own singleton process. It requires
   PostgreSQL, uses Redis only for best-effort status heartbeat publication,
@@ -376,8 +378,7 @@ Before the first production deployment:
 
 #### Production-Specific Notes
 
-- Production is deployed manually from version tags (`v*`). A deployment
-  workflow will be added when the infrastructure target is decided
+- Production is deployed manually from version tags (`v*`)
 - Celery Beat is a singleton — ensure only one instance runs
 - `JWT_SECRET_KEY` rotation invalidates all active sessions (plan for
   off-peak maintenance window). In-flight SSO logins are also affected
@@ -653,6 +654,15 @@ simple orchestration.
 from a `runtime` stage so that build tooling and build-time dependencies
 never reach the published runtime layer. The runtime stage MUST run as a
 non-root user.
+
+**Numeric runtime user.** The runtime stage declares its user numerically,
+`USER 1000:1000`: the UID and GID of the image's `appuser`. A numeric user
+lets an orchestrator verify that the container does not run as root without
+a user override; Kubernetes `runAsNonRoot`, for example, rejects an image
+whose user is a name unless the pod also sets a numeric `runAsUser`. The UID
+and GID are part of the image contract, because volume ownership depends on
+them (see [Git Worker Volume](#git-worker-volume)); changing them breaks
+existing deployments.
 
 **Single image, multiple entrypoints.** All process roles are built from
 this one image — see [Container Images](#container-images) for the
@@ -1325,7 +1335,8 @@ fetch, and catch-up — see
 `docs/features/platform/git-fetcher-infrastructure.md`, Worker Affinity). The
 `-n git@%h` node name keeps it distinct from a Celery worker on the same
 host. Local development runs the same two commands (see
-[Quick Start](#quick-start)).
+[Quick Start](#quick-start)); a deployment adds an explicit `--concurrency`
+to both (see [Kubernetes Workloads](#kubernetes-workloads)).
 
 The IBS RabbitMQ consumer is started as `python -m app.ibs_consumer` (entry
 module `backend/app/ibs_consumer.py`); it is neither a Celery process nor a
@@ -1503,8 +1514,9 @@ creates the default directory owned by that user, so a fresh named volume
 mounted there in a container runtime inherits that ownership. An
 orchestrator volume that does not copy image content (for example a
 Kubernetes PersistentVolumeClaim) needs equivalent ownership, such as a pod
-`fsGroup` matching the runtime user's group. A clone directory the user
-cannot write fails every Git fetcher run at clone time.
+`fsGroup: 1000`, the runtime user's group (see
+[Container Build Conventions](#container-build-conventions)). A clone
+directory the user cannot write fails every Git fetcher run at clone time.
 
 See `docs/features/platform/git-fetcher-infrastructure.md` (Volume
 Requirements, Recovery, Worker Affinity) for volume layout, recovery
@@ -1600,6 +1612,63 @@ effective validity window shrinks from 10 minutes to 8 minutes. While
 modern NTP-synced servers typically maintain sub-second accuracy (making
 this negligible in practice), operators must ensure NTP is configured
 and running on all hosts.
+
+### Kubernetes Workloads
+
+Staging and production run on Kubernetes. This section maps the process roles
+of [Container Images](#container-images) to Kubernetes workloads and states
+what Sentinel requires from them; the environment configuration that
+implements it is maintained outside this repository. Another orchestrator
+meets the same requirements through its own mechanisms (`docs/architecture.md`,
+Deployment-agnostic packaging).
+
+| Role | Workload | Replicas | Update strategy | Further requirements |
+|------|----------|----------|-----------------|----------------------|
+| API server | Deployment | 1 or more | Rolling update | Liveness probe `/health`, readiness probe `/ready`, `timeoutSeconds` of at least 5 (see [Health Checks](#health-checks)) |
+| Celery worker | Deployment | 1 or more | Rolling update | Explicit `--concurrency` (see Worker concurrency below) |
+| Git worker | Deployment | Exactly 1 | `Recreate` | ReadWriteOnce volume at `GIT_CLONE_BASE_DIR` with `fsGroup: 1000` (see [Git Worker Volume](#git-worker-volume)); explicit `--concurrency` |
+| Celery Beat | Deployment | Exactly 1 | Any | A replacement waits for the redbeat distributed lock until the previous instance stops (`docs/features/platform/fetcher-infrastructure.md`, Lock Acquisition) |
+| IBS RabbitMQ consumer | Deployment | Exactly 1 | `Recreate` | `terminationGracePeriodSeconds` of at least 60 (see [Singleton Processes](#singleton-processes)). Not deployed when `IBS_RABBITMQ_ENABLED=false`, because a Deployment restarts a successful exit |
+| Alembic migration | Job | — | — | Completes before any runtime workload starts (see [Database Migrations](#database-migrations)) |
+
+The Git worker needs `Recreate` because a rolling update starts the
+replacement pod before the old one stops: a ReadWriteOnce volume attached to
+the old pod's node cannot attach to a replacement scheduled on another node,
+so the rollout stalls.
+
+**Grace periods.** Apart from the IBS RabbitMQ consumer, no role requires a
+specific grace period. On `SIGTERM`, a Celery worker lets its current task
+finish. A worker killed before its fetcher run finishes leaves that run
+`running`, and stale run detection finalizes it as `failure` only once the
+run's hard time limit plus 60 seconds has elapsed since the run started;
+until then that fetcher does not run again
+(`docs/features/platform/fetcher-infrastructure.md`, Stale Run Detection). A
+killed worker also ends an all-CVE CVSS recalculation in progress, which then
+needs an explicit rerun (see
+[CVSS Recalculation Recovery](#cvss-recalculation-recovery)). Before scaling
+the workers to zero, wait until no fetcher run is `running`
+(`GET /api/v1/fetchers`), or accept the delay.
+
+**Worker concurrency.** When `--concurrency` is omitted, Celery's prefork pool
+starts one child process per CPU reported by `os.cpu_count()`. In a container
+that is the node's CPU count, not the container's CPU limit, so a worker on a
+large node starts more children than its CPU and memory limits support. Both
+worker roles MUST pass `--concurrency` explicitly, sized to their resource
+limits.
+
+**Security context.** Every role runs as the image's numeric non-root user
+(see [Container Build Conventions](#container-build-conventions)) and needs no
+capability, privilege escalation, or privileged port; the API listens on port
+8000. Run every workload with the settings of the Pod Security `restricted`
+profile: `runAsNonRoot: true`, `seccompProfile: RuntimeDefault`,
+`allowPrivilegeEscalation: false`, and `capabilities.drop: [ALL]`.
+
+**Upgrades.** The stop-the-world deployment model of
+[Migration Failure Recovery](#migration-failure-recovery) applies: scale every
+runtime workload to zero, take the pre-deployment database backup, run the
+migration Job with the new image, then start the runtime workloads with the
+same image. Reference the image by the digest verified as described in
+[Consumer discovery and verification](#consumer-discovery-and-verification).
 
 ---
 
@@ -1736,11 +1805,8 @@ Consumers deploying the OCI image through another compatible runtime may adapt
 these runtime-shell commands to their chosen environment. Sentinel does not
 require a runtime-specific image variant.
 
-**Kubernetes pattern.** The deployment target (Kubernetes, Docker
-Compose, or another orchestrator) remains undecided (see
-[Staging-Specific Notes](#staging-specific-notes)). The Kubernetes
-pattern below is documented so operators are not blocked regardless of
-which target is eventually chosen:
+**Kubernetes pattern.** Staging and production run on Kubernetes (see
+[Kubernetes Workloads](#kubernetes-workloads)):
 
 ```bash
 # Ad hoc: exec into a running pod
