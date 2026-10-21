@@ -99,13 +99,18 @@ COPY alembic.ini .
 # Activate the virtual environment for all subsequent commands
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Create the non-root user and the default GIT_CLONE_BASE_DIR it owns: a
-# fresh named volume mounted there inherits this ownership, so the Git
-# worker can clone into it (docs/deployment.md, Git Worker Volume)
-RUN useradd --create-home --no-log-init appuser \
+# Create the non-root user with a fixed UID and GID, and the default
+# GIT_CLONE_BASE_DIR it owns: a fresh named volume mounted there inherits
+# this ownership, so the Git worker can clone into it (docs/deployment.md,
+# Git Worker Volume). USER is numeric so that an orchestrator can verify
+# that the image runs as non-root without a user override, for example
+# Kubernetes runAsNonRoot. The UID and GID are part of the image contract
+# (docs/deployment.md, Container Build Conventions).
+RUN groupadd --gid 1000 appuser \
+    && useradd --create-home --no-log-init --uid 1000 --gid 1000 appuser \
     && install --directory --owner=appuser --group=appuser --mode=0750 \
     /var/lib/sentinel/git
-USER appuser
+USER 1000:1000
 
 EXPOSE 8000
 
