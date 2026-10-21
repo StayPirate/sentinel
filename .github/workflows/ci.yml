@@ -243,7 +243,7 @@ jobs:
       # renovate: datasource=github-releases depName=koalaman/shellcheck
       SHELLCHECK_VERSION: "0.11.0"
       # renovate: datasource=github-releases depName=mvdan/sh
-      SHFMT_VERSION: "3.13.1"
+      SHFMT_VERSION: "3.14.1"
       # renovate: datasource=github-releases depName=rhysd/actionlint
       ACTIONLINT_VERSION: "1.7.12"
     steps:
