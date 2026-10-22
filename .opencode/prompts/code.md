@@ -46,7 +46,8 @@ including those discovered during implementation after the plan was approved:
 evaluate the options, decide, record the decision, align the specification in
 the same PR when the decision refines an existing contract, and disclose it in
 the pre-PR report. Anything outside that delegation, or uncertain, follows the
-protocol below.
+protocol below, except a new dependency, which follows `AGENTS.md` (New
+dependencies) instead.
 
 When a gap exists:
 
@@ -111,8 +112,9 @@ brief would cost more than it saves.
   the issue and branch already exist. A task does not inherit your reads or
   your conversation.
 - Instruct each task not to start the Git workflow, commit, push, perform
-  GitHub mutations, edit `docs/**`, invoke reviewers, or take gap or delegated
-  decisions; it reports any such need in its result instead.
+  GitHub mutations, edit `docs/**`, invoke reviewers, add a new dependency
+  that the user has not admitted (`AGENTS.md`, New dependencies), or take gap
+  or delegated decisions; it reports any such need in its result instead.
 - After each task, inspect its diff and rerun the focused checks yourself
   before continuing. The task's summary is context, not evidence.
 
@@ -154,7 +156,9 @@ infrastructure, and configuration artifacts. Feature specifications are not
 required for internal operational changes, but use the Gap Protocol when a
 missing decision would establish or change an operational contract, security
 or data-integrity requirement, or architectural boundary. Equivalent internal
-technical choices remain implementation decisions.
+technical choices remain implementation decisions. A new dependency is never
+one, here or in feature work: it requires the user decision in `AGENTS.md`
+(New dependencies).
 
 ## Git and workflow
 
@@ -178,6 +182,8 @@ Before opening a PR, report:
 - changed files;
 - decisions taken under delegation and the specification alignments they
   required;
+- new dependencies, with their justification and the user decision that
+  admitted them;
 - `@spec-conformance-reviewer` verdict; and
 - unresolved findings or risks.
 

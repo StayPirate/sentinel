@@ -131,6 +131,24 @@ delegated, treat it as a gap. A plan that takes delegated decisions presents
 them in a **Decisions** section listing the options considered, their impact,
 and the choice. Reviewer triggers for an aligned specification still apply.
 
+**New dependencies.** Adding a new dependency is never a delegated decision. A
+new dependency is a third-party component that a change would directly
+declare, pin, install, or load for the first time: for example a Python
+package (runtime or development, a new extra of a declared package, or a
+package in a script's inline metadata), a GitHub Action, a tool or container
+image that CI, a Git hook, the `Makefile`, or a script runs, an OS package or
+base image of the runtime image, or an asset that the application loads from
+a third party. Before adding one, or before a document under `docs/`
+prescribes one, present a justification and obtain the user's explicit
+decision; naming the dependency in a tracking issue is not that decision. The
+justification states the current requirement the dependency serves, why the
+standard library or an already declared dependency does not suffice, where it
+runs or ships (runtime image, browser, CI, or development only), its license,
+and its maintenance status and transitive footprint. A dependency that a
+merged document under `docs/` already prescribes needs no further decision.
+The pull request records the justification and the decision. Updates, version
+changes, and removals of declared dependencies are outside this rule.
+
 Before writing any file, verify its placement against the actual repository and
 the authoritative architecture/conventions. Core locations are:
 
