@@ -22,6 +22,7 @@ from redis.exceptions import RedisError
 from sqlalchemy.exc import OperationalError
 
 import app.cli.api_key as api_key_module
+import app.cli.example_data as example_data_module
 import app.cli.fetcher as fetcher_module
 import app.cli.manage_user as manage_user_module
 from app.cli import cli, main
@@ -54,6 +55,7 @@ def _forbid_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(manage_user_module, "bootstrap", _fail)
     monkeypatch.setattr(api_key_module, "bootstrap", _fail)
     monkeypatch.setattr(fetcher_module, "bootstrap", _fail)
+    monkeypatch.setattr(example_data_module, "bootstrap", _fail)
 
 
 @pytest.mark.unit
@@ -67,6 +69,7 @@ def test_root_help_exits_zero_without_bootstrap(
     assert "manage-user" in result.output
     assert "api-key" in result.output
     assert "fetcher" in result.output
+    assert "example-data" in result.output
 
 
 @pytest.mark.unit
@@ -175,6 +178,26 @@ def test_api_key_command_help_exits_zero_without_bootstrap(
 ) -> None:
     _forbid_bootstrap(monkeypatch)
     result = _invoke(["api-key", command, "--help"])
+    assert result.exit_code == 0
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
+def test_example_data_group_help_exits_zero_without_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forbid_bootstrap(monkeypatch)
+    result = _invoke(["example-data", "--help"])
+    assert result.exit_code == 0
+    assert "load" in result.output
+
+
+@pytest.mark.unit
+def test_example_data_load_help_exits_zero_without_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forbid_bootstrap(monkeypatch)
+    result = _invoke(["example-data", "load", "--help"])
     assert result.exit_code == 0
     assert "Traceback" not in result.output
 

@@ -67,6 +67,7 @@ from app.models.ibs_request import IBSRequest
 from app.models.ibs_request_action import IBSRequestAction
 from app.models.ibs_request_action_track import IBSRequestActionTrack
 from app.models.identity_audit_event import IdentityAuditEvent
+from app.models.mixins import AuditEventMixin
 from app.models.product import Product
 from app.models.product_repository import ProductRepository
 from app.models.setting_audit_event import SettingAuditEvent
@@ -85,8 +86,6 @@ from app.services import example_dataset, package_service, ticket_service, user_
 from app.services import settings as settings_service
 from app.services.base_fetcher import FETCHER_REGISTRY
 from app.services.example_dataset import (
-    PASSWORD,
-    STEPS,
     ExampleDatasetEffectError,
     ExampleDatasetNotEmptyError,
     ExampleDatasetProgress,
@@ -604,6 +603,49 @@ TICKET_EVENT_TYPES: Final = frozenset(
 )
 """Audit Trails: the Ticket events that the dataset names."""
 
+ATTRIBUTED_TICKET_EVENTS: Final = frozenset(
+    {
+        # Tickets, "Created by": ingestion (system) or the manual creator.
+        *((n, "ticket_created", None) for n in (*range(1, 18), 23, 24, 25)),
+        (18, "ticket_created", "asmith"),
+        (19, "ticket_created", "bwilson"),
+        (20, "ticket_created", "cwhite"),
+        (21, "ticket_created", "asmith"),
+        (22, "ticket_created", "bwilson"),
+        (18, "coordinated_release_changed", "asmith"),
+        # Ticket work: the direct event of each operation, by its actor.
+        (11, "package_added", "bwilson"),
+        (11, "track_status_changed", "bwilson"),
+        (12, "assignment", "bwilson"),
+        (12, "priority_changed", "bwilson"),
+        (12, "reference_added", "asmith"),
+        (13, "package_added", "asmith"),
+        (13, "track_status_changed", "asmith"),
+        (13, "cvss_assessment_changed", "asmith"),
+        (14, "package_added", "asmith"),
+        (14, "track_status_changed", "asmith"),
+        (14, "cvss_assessment_changed", "asmith"),
+        (14, "track_status_changed", None),  # track release detection
+        (14, "product_released", None),  # Product release detection
+        (15, "package_added", "bwilson"),
+        (15, "track_status_changed", "bwilson"),
+        (15, "cvss_assessment_changed", "bwilson"),
+        (16, "package_added", "asmith"),
+        (16, "track_status_changed", "asmith"),
+        (16, "cvss_assessment_changed", "asmith"),
+        (17, "status_change", "bwilson"),
+        (18, "package_added", "asmith"),
+        (18, "track_status_changed", "asmith"),
+        (18, "access_grant_added", "asmith"),
+        (19, "confidentiality_changed", "bwilson"),
+        (22, "duplicate_set", "bwilson"),
+        # Maintainership is system-attributed (ticket-audit-log.md).
+        *((n, "package_maintainer_added", None) for n in (11, 13, 14, 18)),
+    }
+)
+"""Attribution: `(SNTL number, Ticket event, actor)` that the dataset
+operations produce; `None` is the system actor."""
+
 # ---------------------------------------------------------------------------
 # Coverage exception lists (testing-strategy.md, Example Dataset > Coverage)
 # ---------------------------------------------------------------------------
@@ -797,11 +839,6 @@ def empty(server: URL) -> Iterator[str]:
 # ---------------------------------------------------------------------------
 # Load: the resulting state equals Dataset Content
 # ---------------------------------------------------------------------------
-
-
-def test_public_constants_match_the_specification() -> None:
-    assert PASSWORD == DATASET_PASSWORD
-    assert STEPS == STEP_NAMES
 
 
 class TestUsers:
@@ -1249,19 +1286,33 @@ class TestTickets:
         assert grants == {(18, "cwhite", "asmith")}
 
     def test_ticket_audit_events(self, loaded: Loaded) -> None:
-        async def reader(db: AsyncSession) -> list[tuple[int, str, str | None]]:
+        async def reader(
+            db: AsyncSession,
+        ) -> list[tuple[int, str, str | None, dict[str, Any] | None]]:
             actor = aliased(User)
             rows = await db.execute(
-                select(Ticket.sequence_id, TicketAuditEvent.event_type, actor.username)
+                select(
+                    Ticket.sequence_id,
+                    TicketAuditEvent.event_type,
+                    actor.username,
+                    TicketAuditEvent.detail,
+                )
                 .join(Ticket, Ticket.id == TicketAuditEvent.ticket_id)
                 .outerjoin(actor, actor.id == TicketAuditEvent.user_id)
             )
-            return [(n, event_type, actor) for n, event_type, actor in rows]
+            return [(n, kind, name, detail) for n, kind, name, detail in rows]
 
         events = read(loaded.url, reader)
+        attributed = {(n, kind, name) for n, kind, name, _ in events}
 
-        assert {event_type for _, event_type, _ in events} >= TICKET_EVENT_TYPES
-        assert (19, "confidentiality_changed", "bwilson") in events
+        assert {kind for _, kind, _ in attributed} >= TICKET_EVENT_TYPES
+        assert attributed >= ATTRIBUTED_TICKET_EVENTS
+        [released] = [
+            detail for _, kind, _, detail in events if kind == "product_released"
+        ]
+        assert released is not None
+        assert released["advisory_id"] == "SUSE-SU-2099:0001-1"
+        assert released["product_cpe"] == SERVER_15_SP7
 
 
 class TestPackages:
@@ -1517,15 +1568,24 @@ def test_references(loaded: Loaded) -> None:
 
 
 def test_every_audit_trail_holds_events(loaded: Loaded) -> None:
+    """Every audit trail of the application, derived from the event models
+    so that a new trail is covered without a change here."""
+    trails = {
+        mapper.local_table.name
+        for mapper in Base.registry.mappers
+        if isinstance(mapper.local_table, Table)
+        and issubclass(mapper.class_, AuditEventMixin)
+        and mapper.class_.__module__.startswith("app.")
+    }
     counts = read(loaded.url, table_counts)
 
-    for table in (
+    assert trails >= {
         "ticket_audit_event",
         "identity_audit_event",
         "fetcher_audit_event",
         "setting_audit_event",
-    ):
-        assert counts[table] > 0, table
+    }
+    assert {trail for trail in trails if counts[trail] == 0} == set()
 
 
 def test_repeated_load_is_refused_and_changes_nothing(loaded: Loaded) -> None:
@@ -1673,6 +1733,11 @@ def test_load_is_isolated_and_reports_its_steps(server: URL) -> None:
     real_commit = AsyncSession.commit
 
     async def checked_commit(session: AsyncSession) -> None:
+        # The loader detaches callbacks and rolls back before any commit it
+        # owns, so for its own commits this spy confirms that the load's
+        # check passed (the registered-effect tests prove that the check
+        # detects an effect); it also covers the self-committing catalog
+        # publications.
         commits.append(session)
         if pending_ticket_convergence_effects(session) != ():
             violations.append("Ticket convergence effect at commit")

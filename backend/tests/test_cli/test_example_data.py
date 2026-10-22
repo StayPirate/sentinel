@@ -18,8 +18,11 @@ is disposed on its own event loop after the invocation.
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final
 from unittest.mock import MagicMock
@@ -34,10 +37,12 @@ import app.cli.example_data as example_data_module
 from app.cli import main
 from app.core.exceptions import ServiceError
 from app.database import register_post_commit_callback
+from app.models.fetcher_config import FetcherConfig
 from app.models.identity_audit_event import IdentityAuditEvent
 from app.models.user import User
 from app.services import settings as settings_service
 from app.services import user_service
+from app.services.base_fetcher import FETCHER_REGISTRY
 from tests.support.example_dataset import (
     dataset_database,
     dataset_engine,
@@ -76,6 +81,8 @@ FICTIONAL_PASSWORD_HASH: Final = "$2b$12$" + "a" * 53
 
 UNREACHABLE_URL: Final = "postgresql+asyncpg://sentinel:sentinel@127.0.0.1:9/none"
 """A closed local port: no PostgreSQL server listens there."""
+
+_BACKEND_DIR: Final = Path(__file__).resolve().parents[2]
 
 
 class FictionalServiceError(ServiceError):
@@ -196,6 +203,36 @@ def test_load_reports_every_step_and_exits_zero(
     assert captured.err == ""
     assert run_spy.call_count == 1
     assert _read(database, _identity_counts)[0] == 6
+
+
+def test_a_fresh_process_disables_every_production_fetcher(database: str) -> None:
+    """The load imports the production fetcher registry itself
+    (example-dataset.md, Service: Q3). The test process has imported it
+    already, so only a fresh `python -m app.cli` process, which loads no
+    fetcher module before the command runs, proves that every production
+    fetcher is created and disabled."""
+
+    async def fetchers(db: AsyncSession) -> dict[str, bool]:
+        rows = await db.execute(
+            select(FetcherConfig.fetcher_name, FetcherConfig.enabled)
+        )
+        return {row.fetcher_name: row.enabled for row in rows}
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "app.cli", "example-data", "load"],
+        cwd=_BACKEND_DIR,
+        env={**os.environ, "DATABASE_URL": database},
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines()[-1] == "Loaded the example dataset."
+    with production_registries():
+        production = set(FETCHER_REGISTRY)
+    assert _read(database, fetchers) == dict.fromkeys(production, False)
 
 
 # ---------------------------------------------------------------------------
