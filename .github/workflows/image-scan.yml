@@ -86,7 +86,7 @@ jobs:
           vuln-type: "os"
           scanners: "vuln"
           severity: "HIGH,CRITICAL"
-          version: "v0.76.0"
+          version: "v0.76.1"
 
       # Complete report: every OS-level finding regardless of fix
       # availability or severity, for awareness only. Never fails the
