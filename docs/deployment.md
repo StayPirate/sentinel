@@ -486,7 +486,9 @@ workflows and the files they read, Renovate tracks:
   on PyPI. Copies of the same pin are updated in one PR.
 - **Browser assets loaded from `https://unpkg.com/<package>@<version>/`**
   (the Swagger UI of `deploy-api-docs.yml`), through a custom manager that
-  looks the package up on npm.
+  looks the package up on npm. The same manager tracks the Swagger UI of the
+  API's `/docs` page (`docs/api-spec.md`, OpenAPI Document and Interactive
+  Documentation), and both copies are updated in one PR.
 - **Container images pinned by version and digest** (the Renovate image of
   `renovate-validation.yml`, and the Syft and CycloneDX CLI images of
   `.github/sbom-tools.env`), through a custom manager per image.
@@ -500,7 +502,9 @@ start; a tool a workflow downloads is pinned through a hinted `env:` entry.
 Updates of the dependencies that these custom managers find under
 `.github/` or in the `Makefile` use the `ci(deps):` title prefix, like
 GitHub Actions updates, and each tool gets its own PR. The `ci` type
-carries no release signal (`docs/conventions.md`, Versioning).
+carries no release signal (`docs/conventions.md`, Versioning). Swagger UI
+updates use `chore(deps):` instead, because the image ships the copy of the
+`/docs` page; that type carries no release signal either.
 
 `renovate-validation.yml` is a separate, advisory repository check. It runs
 on every pull request rather than maintaining a whitelist of Renovate-managed
@@ -1295,7 +1299,10 @@ tagged code on every version tag push, independently of `build-images.yml`.
 Pages therefore shows only the most recent version tag and, like the floating
 image tags (Image Tag Semantics), may show a version whose GitHub Release is
 not yet published, or never is when its release run fails. A consumer that
-needs the contract of a specific version uses the release asset.
+needs the contract of a specific version uses the release asset. The site
+loads the same Swagger UI release as the `/docs` page that a running API
+serves for its own version (`docs/api-spec.md`, OpenAPI Document and
+Interactive Documentation).
 
 ### Container Image Retention
 

@@ -158,7 +158,8 @@ commands.
 ## API Documentation
 
 Interactive API documentation (Swagger UI) is published to GitHub Pages on
-every version tag: **[API Docs](https://vulnwatch.github.io/sentinel/)**
+every version tag: **[API Docs](https://vulnwatch.github.io/sentinel/)**.
+A running Sentinel API serves the same page for its own version at `/docs`.
 
 The OpenAPI document of each version is attached to its GitHub Release as
 `sentinel-<version>.openapi.json`; use it to pin the contract of a specific

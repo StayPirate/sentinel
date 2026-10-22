@@ -21,6 +21,27 @@ Rules:
 - When a new version is eventually introduced, the previous version will
   include a `Sunset` response header indicating the deprecation date
 
+### OpenAPI Document and Interactive Documentation
+
+The API serves, outside `/api/v1/` and without authentication:
+
+- its OpenAPI document at `/openapi.json`, the same document that the release
+  asset of its version carries (`docs/deployment.md`, API Documentation
+  Publication); and
+- an interactive documentation page at `/docs`: a Swagger UI HTML page over
+  that document.
+
+Neither is an operation of the document, and no other documentation viewer,
+such as ReDoc, is served.
+
+The page runs in the API's origin, where the session cookie is valid and
+Cross-Origin Request Protection accepts requests as same-origin, so every
+script it loads acts with the access of the user who opens it. It therefore
+loads its browser assets from one exact `swagger-ui-dist` release, never
+through a reference that resolves to the latest release, and that release
+changes only through a reviewed dependency update (`docs/deployment.md`,
+Workflow Conventions).
+
 ## Authentication and Authorization
 
 ### Authentication
@@ -526,7 +547,8 @@ SHOULD respect these headers proactively to avoid hitting limits.
 
 ### Response Format
 
-All responses use JSON.
+All responses use JSON, except the interactive documentation page (see
+OpenAPI Document and Interactive Documentation).
 
 **Paginated list endpoints** return:
 

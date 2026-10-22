@@ -5,20 +5,24 @@ workflow pins to be tracked by Renovate, and lists the forms that the
 `renovate.jsonc` custom managers match. These tests keep the pins of the
 `Shell Lint` job, the `uvx` tools, and the Swagger UI assets in those forms
 with exact versions: a pin that leaves its form is silently dropped from
-dependency extraction rather than rejected. See issue #1060.
+dependency extraction rather than rejected. See issue #1060. The Swagger UI
+of the API's `/docs` page shares the GitHub Pages site's pin (issue #1070).
 
 The workflows are parsed as YAML (`tests/support/yaml_files.py`); only the
-Renovate hint comments, which are not YAML data, and the `Makefile` are
-read as text.
+Renovate hint comments, which are not YAML data, the `Makefile`, and the
+`/docs` page module are read as text.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from app.api.interactive_docs import SWAGGER_UI_DIST
 from tests.support.yaml_files import (
     load_yaml_file,
     named_step,
@@ -31,6 +35,8 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CI_PATH = WORKFLOWS_DIR / "ci.yml"
 DEPLOY_API_DOCS_PATH = WORKFLOWS_DIR / "deploy-api-docs.yml"
 MAKEFILE_PATH = REPO_ROOT / "Makefile"
+INTERACTIVE_DOCS_PATH = REPO_ROOT / "backend" / "app" / "api" / "interactive_docs.py"
+RENOVATE_CONFIG_PATH = REPO_ROOT / "renovate.jsonc"
 
 EXACT_VERSION = r"\d+\.\d+\.\d+"
 
@@ -50,6 +56,14 @@ UNPKG_URL = re.compile(r"https://unpkg\.com/[^\s\"']+")
 SWAGGER_UI_ASSET = re.compile(
     rf"https://unpkg\.com/swagger-ui-dist@(?P<version>{EXACT_VERSION})/(?P<asset>[\w.-]+)"
 )
+
+
+def _renovate_config() -> dict[str, Any]:
+    """`renovate.jsonc` without its comments, which are whole lines."""
+    lines = RENOVATE_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
+    document = "\n".join(line for line in lines if not line.lstrip().startswith("//"))
+    config: dict[str, Any] = json.loads(document)
+    return config
 
 
 def _workflow_files() -> list[Path]:
@@ -120,3 +134,48 @@ def test_swagger_ui_assets_share_one_exact_unpkg_version() -> None:
         "swagger-ui.css",
     ]
     assert len({asset["version"] for asset in assets if asset}) == 1
+
+
+@pytest.mark.unit
+def test_pages_site_enables_the_operation_filter() -> None:
+    jobs = workflow_jobs(load_yaml_file(DEPLOY_API_DOCS_PATH))
+    site_script = named_step(jobs["build"], "Build Swagger UI static site")["run"]
+
+    assert "filter: true," in site_script
+
+
+@pytest.mark.unit
+def test_unpkg_manager_extracts_both_swagger_ui_copies_on_one_version() -> None:
+    # Renovate updates the GitHub Pages site and the API's /docs page in
+    # one PR only while its unpkg manager extracts both as the same
+    # dependency, and the page loads only the literal it extracts.
+    manager = next(
+        manager
+        for manager in _renovate_config()["customManagers"]
+        if manager.get("datasourceTemplate") == "npm"
+    )
+    file_patterns = [re.compile(p.strip("/")) for p in manager["managerFilePatterns"]]
+    # Renovate's named groups use the JavaScript (?<name>) syntax.
+    match_strings = [
+        re.compile(string.replace("(?<", "(?P<")) for string in manager["matchStrings"]
+    ]
+    api_version = re.fullmatch(
+        rf"https://unpkg\.com/swagger-ui-dist@(?P<version>{EXACT_VERSION})/",
+        SWAGGER_UI_DIST,
+    )
+    assert api_version, SWAGGER_UI_DIST
+
+    for path in (DEPLOY_API_DOCS_PATH, INTERACTIVE_DOCS_PATH):
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        text = path.read_text(encoding="utf-8")
+        extracted = {
+            (match["depName"], match["currentValue"])
+            for pattern in match_strings
+            for match in pattern.finditer(text)
+        }
+
+        assert any(pattern.search(relative) for pattern in file_patterns), relative
+        assert extracted == {("swagger-ui-dist", api_version["version"])}, relative
+    assert UNPKG_URL.findall(INTERACTIVE_DOCS_PATH.read_text(encoding="utf-8")) == [
+        SWAGGER_UI_DIST
+    ]

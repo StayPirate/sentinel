@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Match
 
-from app.api import health
+from app.api import health, interactive_docs
 from app.api.dependencies import drain_ticket_convergence_after_commit
 from app.api.openapi import API_V1_RESPONSES, SentinelAPI
 from app.api.v1 import (
@@ -86,6 +86,11 @@ app = SentinelAPI(
     version=get_version("sentinel"),
     debug=settings.debug,
     lifespan=lifespan,
+    # FastAPI's own pages load the latest viewer release from a CDN; the
+    # pinned Swagger UI page is registered below
+    # (`app/api/interactive_docs.py`), and no other viewer is served.
+    docs_url=None,
+    redoc_url=None,
     # Applies the shared query-parameter length limit
     # (docs/api-spec.md, Query Parameter Length Limit) and the
     # inadmissible-character rejection (docs/api-spec.md, Inadmissible
@@ -265,6 +270,7 @@ async def _http_exception_handler(
 
 
 app.include_router(health.router)
+app.add_route("/docs", interactive_docs.swagger_ui_html, include_in_schema=False)
 
 # Every `/api/v1` route drains the Ticket convergence effects registered in
 # its request transaction after `get_db()` commits

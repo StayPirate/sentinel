@@ -124,8 +124,11 @@
     },
     {
       "customType": "regex",
-      "description": "Browser assets that a workflow loads from unpkg (the Swagger UI of deploy-api-docs.yml) — Renovate's cdnurl and html managers support cdnjs only",
-      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "description": "Browser assets loaded from unpkg: the Swagger UI of deploy-api-docs.yml and of the API's /docs page (backend/app/api/interactive_docs.py) — Renovate's cdnurl and html managers support cdnjs only",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/^backend/app/api/interactive_docs\\.py$/"
+      ],
       "matchStrings": [
         "https://unpkg\\.com/(?<depName>(?:@[a-z0-9._-]+/)?[a-z0-9._-]+)@(?<currentValue>[^/\\s\"']+)/"
       ],
@@ -161,6 +164,11 @@
       "matchManagers": ["custom.regex"],
       "matchFileNames": [".github/**", "Makefile"],
       "commitMessagePrefix": "ci(deps):"
+    },
+    {
+      "description": "Swagger UI, loaded by the GitHub Pages site and by the API's /docs page: the image ships the second copy, so the PR that updates both is not a CI-only change. Placed after the rule above so that it also applies to the workflow copy",
+      "matchPackageNames": ["swagger-ui-dist"],
+      "commitMessagePrefix": "chore(deps):"
     },
     {
       "description": "Docker image and ARG-templated digest updates (backend/Dockerfile)",
