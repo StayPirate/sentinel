@@ -124,7 +124,7 @@
     },
     {
       "customType": "regex",
-      "description": "Browser assets loaded from unpkg: the Swagger UI of deploy-api-docs.yml and of the API's /docs page (backend/app/api/interactive_docs.py) — Renovate's cdnurl and html managers support cdnjs only",
+      "description": "Browser assets loaded from unpkg: the Swagger UI of deploy-api-docs.yml and of the API's /api/docs page (backend/app/api/interactive_docs.py) — Renovate's cdnurl and html managers support cdnjs only",
       "managerFilePatterns": [
         "/^\\.github/workflows/[^/]+\\.ya?ml$/",
         "/^backend/app/api/interactive_docs\\.py$/"
@@ -166,7 +166,7 @@
       "commitMessagePrefix": "ci(deps):"
     },
     {
-      "description": "Swagger UI, loaded by the GitHub Pages site and by the API's /docs page: the image ships the second copy, so the PR that updates both is not a CI-only change. Placed after the rule above so that it also applies to the workflow copy",
+      "description": "Swagger UI, loaded by the GitHub Pages site and by the API's /api/docs page: the image ships the second copy, so the PR that updates both is not a CI-only change. Placed after the rule above so that it also applies to the workflow copy",
       "matchPackageNames": ["swagger-ui-dist"],
       "commitMessagePrefix": "chore(deps):"
     },

@@ -6,12 +6,12 @@ workflow pins to be tracked by Renovate, and lists the forms that the
 `Shell Lint` job, the `uvx` tools, and the Swagger UI assets in those forms
 with exact versions: a pin that leaves its form is silently dropped from
 dependency extraction rather than rejected. See issue #1060. The Swagger UI
-of the API's `/docs` page shares the GitHub Pages site's pin, and the site
+of the API's `/api/docs` page shares the GitHub Pages site's pin, and the site
 enables the operation filter (issue #1070).
 
 The workflows are parsed as YAML (`tests/support/yaml_files.py`); only the
 Renovate hint comments, which are not YAML data, the `Makefile`, and the
-`/docs` page module are read as text.
+`/api/docs` page module are read as text.
 """
 
 from __future__ import annotations
@@ -147,7 +147,7 @@ def test_pages_site_enables_the_operation_filter() -> None:
 
 @pytest.mark.unit
 def test_unpkg_manager_extracts_both_swagger_ui_copies_on_one_version() -> None:
-    # Renovate updates the GitHub Pages site and the API's /docs page in
+    # Renovate updates the GitHub Pages site and the API's /api/docs page in
     # one PR only while its unpkg manager extracts both as the same
     # dependency, and the page loads only the literal it extracts.
     manager = next(

@@ -49,6 +49,7 @@ For architectural decisions and design constraints, see
   - [Timezone and Locale Requirements](#timezone-and-locale-requirements)
   - [Python Interpreter Limits](#python-interpreter-limits)
   - [Clock Synchronization](#clock-synchronization)
+  - [Sentinel Host](#sentinel-host)
   - [Kubernetes Workloads](#kubernetes-workloads)
 - [Operations](#operations)
   - [Database Migrations](#database-migrations)
@@ -263,7 +264,7 @@ cd backend && uv run python -m app.cli manage-user create \
 | `SSO_CLIENT_ID` | Same as production | Single client registration |
 | `SSO_CLIENT_SECRET` | Same as production | Single client registration |
 | `SSO_REDIRECT_URI` | `https://sentinel-staging.suse.de/auth/callback` | Must match IdP registration |
-| `CORS_ORIGINS` | `https://sentinel-staging.suse.de` | |
+| `CORS_ORIGINS` | Empty or unset | The UI is served from the API's origin and needs no entry (`docs/configuration.md`, Application) |
 | `DEBUG` | `false` | Never enable debug in staging |
 | `IBS_API_URL` | `https://api.suse.de` | |
 | `IBS_USERNAME` / `IBS_SSH_PRIVATE_KEY` | Dedicated non-personal IBS account and the one-line base64 encoding of its unencrypted Ed25519 private-key file | Supply the key through the environment or secret store; never log it |
@@ -281,10 +282,13 @@ cd backend && uv run python -m app.cli manage-user create \
 4. **Start all runtime processes** defined in
    [Container Images](#container-images) — each as a separate
    container/process
-5. **Verify health**:
+5. **Serve the host**: deploy the UI image and route the Sentinel host (see
+   [Sentinel Host](#sentinel-host))
+6. **Verify health** on the API container, not through the host, where
+   these paths belong to the UI:
    - `GET /health` — liveness (API process is running)
    - `GET /ready` — readiness (PostgreSQL + Redis reachable)
-6. **Verify SSO**: navigate to the login page, confirm "Login with SUSE
+7. **Verify SSO**: navigate to the login page, confirm "Login with SUSE
    SSO" button appears, complete a test login
 
 #### Staging-Specific Notes
@@ -309,7 +313,6 @@ Same as staging, with these differences:
 | Setting | Value | Notes |
 |---------|-------|-------|
 | `SSO_REDIRECT_URI` | `https://sentinel.suse.de/auth/callback` | Production URI |
-| `CORS_ORIGINS` | `https://sentinel.suse.de` | |
 | `JWT_SECRET_KEY` | Unique production secret | Different from staging |
 
 #### Deployment Steps
@@ -319,9 +322,11 @@ Same as staging, with these differences:
    startup (multiple replicas could conflict).
 2. **Deploy all runtime processes** defined in
    [Container Images](#container-images)
-3. **Health checks**: configure orchestrator to use `/health` (liveness)
-   and `/ready` (readiness)
-4. **Verify**: confirm all services are healthy, check logs for errors
+3. **Serve the host**: deploy the UI image and route the Sentinel host (see
+   [Sentinel Host](#sentinel-host))
+4. **Health checks**: configure orchestrator to use `/health` (liveness)
+   and `/ready` (readiness) on the API container
+5. **Verify**: confirm all services are healthy, check logs for errors
 
 #### Pre-Production Checklist
 
@@ -360,7 +365,11 @@ Before the first production deployment:
       Git-based CVE fetchers never run
 - [ ] DNS configured for `sentinel.suse.de`
 - [ ] TLS certificate provisioned for `sentinel.suse.de`
-- [ ] Reverse proxy / ingress configured to route `/api` to backend
+- [ ] Reverse proxy / ingress of `sentinel.suse.de` routes `/api` to the API
+      and every other path to the UI image, serves HTTPS only, and sets
+      `Strict-Transport-Security` (see [Sentinel Host](#sentinel-host))
+- [ ] UI image deployed at the release that supports the deployed Sentinel
+      version (see [Sentinel Host](#sentinel-host))
 - [ ] Reverse proxy / ingress forwards the `Host`, `Origin`, and
       `Sec-Fetch-Site` request headers to the backend unchanged
       (`docs/features/identity/authentication.md`, Cross-Origin Request
@@ -376,7 +385,9 @@ Before the first production deployment:
       Session cookie)
 - [ ] Rate limiting configured on the reverse proxy for public authentication
       endpoints (see issue #682)
-- [ ] CORS origins set correctly
+- [ ] `CORS_ORIGINS` empty or unset, unless a browser client is served from
+      an origin other than the Sentinel host (`docs/configuration.md`,
+      Application)
 - [ ] Log aggregation configured (see Log Aggregation, below)
 - [ ] Backup strategy for PostgreSQL defined
 
@@ -487,7 +498,7 @@ workflows and the files they read, Renovate tracks:
 - **Browser assets loaded from `https://unpkg.com/<package>@<version>/`**
   (the Swagger UI of `deploy-api-docs.yml`), through a custom manager that
   looks the package up on npm. The same manager tracks the Swagger UI of the
-  API's `/docs` page (`docs/api-spec.md`, OpenAPI Document and Interactive
+  API's `/api/docs` page (`docs/api-spec.md`, OpenAPI Document and Interactive
   Documentation), and both copies are updated in one PR.
 - **Container images pinned by version and digest** (the Renovate image of
   `renovate-validation.yml`, and the Syft and CycloneDX CLI images of
@@ -504,7 +515,7 @@ Updates of the dependencies that these custom managers find under
 GitHub Actions updates, and each tool gets its own PR. The `ci` type
 carries no release signal (`docs/conventions.md`, Versioning). Swagger UI
 updates use `chore(deps):` instead, because the image ships the copy of the
-`/docs` page; that type carries no release signal either.
+`/api/docs` page; that type carries no release signal either.
 
 `renovate-validation.yml` is a separate, advisory repository check. It runs
 on every pull request rather than maintaining a whitelist of Renovate-managed
@@ -1274,8 +1285,8 @@ guard and the first registry push: `scripts/extract-openapi.sh` runs
 `backend/scripts/generate_openapi.py` of the built commit inside the tested
 candidate image, without network access. The document is therefore generated
 by the application code and dependencies of the image that is published, and
-it is the document that the image's API serves at `/openapi.json` under the
-default command. A failed extraction, or output that is not an OpenAPI
+it is the document that the image's API serves at `/api/openapi.json` under
+the default command. A failed extraction, or output that is not an OpenAPI
 document, fails the build job before any push, on `master` builds as on
 version-tag builds. The document is retained as a seven-day workflow artifact.
 On a version-tag build the release-metadata job attaches it to the draft
@@ -1300,7 +1311,7 @@ Pages therefore shows only the most recent version tag and, like the floating
 image tags (Image Tag Semantics), may show a version whose GitHub Release is
 not yet published, or never is when its release run fails. A consumer that
 needs the contract of a specific version uses the release asset. The site
-loads the same Swagger UI release as the `/docs` page that a running API
+loads the same Swagger UI release as the `/api/docs` page that a running API
 serves for its own version (`docs/api-spec.md`, OpenAPI Document and
 Interactive Documentation).
 
@@ -1659,6 +1670,52 @@ modern NTP-synced servers typically maintain sub-second accuracy (making
 this negligible in practice), operators must ensure NTP is configured
 and running on all hosts.
 
+### Sentinel Host
+
+Staging and production each serve Sentinel to browsers from one host,
+`sentinel-staging.suse.de` and `sentinel.suse.de` respectively, which serves
+both the API and the web UI. The UI is not a process role of this image: the separate
+`sentinel-aura` repository releases it as its own OCI image
+(`docs/architecture.md`, System Boundary). Served from the API's origin, the
+UI receives the session cookie and passes Cross-Origin Request Protection
+without a `CORS_ORIGINS` entry (`docs/features/identity/authentication.md`,
+Session cookie and Cross-Origin Request Protection).
+
+The reverse proxy or ingress of the host meets these requirements:
+
+- **Routing.** A request whose path is `/api` or starts with `/api/` goes to
+  the API server; every other path, `/auth/callback` included (see
+  [IdP Client Registration](#idp-client-registration-idsusecom)), goes to the
+  UI image. The prefix is matched by whole path segment, so `/apidocs` goes to
+  the UI. The request path reaches either component unchanged: the API serves
+  its paths under `/api/` itself (`docs/api-spec.md`, Base URL), so no prefix
+  is removed or added.
+- **Probes.** `/health` and `/ready` are not routed to the API. On the host
+  they belong to the UI, so a response there proves nothing about the API:
+  the orchestrator probes the API container directly (see
+  [Health Checks](#health-checks)), and an availability check through the
+  host requests a path under `/api/`, such as `GET /api/openapi.json`.
+- **HTTPS only.** A plain HTTP request is answered only with a redirect to
+  the same URL over HTTPS. The browser accepts the session cookie only from a
+  secure origin.
+- **`Strict-Transport-Security`.** The component that terminates TLS for the
+  host sets it on every HTTPS response of the host, the API's and the UI's
+  alike, with a `max-age` of at least one year (`31536000`). Neither image
+  sets it, because it applies to the whole host and only over HTTPS. It omits
+  `preload`: the HSTS preload list covers whole registrable domains, such as
+  `suse.de`, not a single host.
+- **Response headers.** The proxy neither removes nor changes the headers
+  that the API and the UI image set on their responses; the UI image sets the
+  other security headers of its own responses.
+
+The request headers that reach the API and the `Cookie` header that no
+component logs are covered by the
+[Pre-Production Checklist](#pre-production-checklist).
+
+**Versions.** The UI declares the one Sentinel version that it supports. The
+UI release deployed on a host is the one that supports the Sentinel version
+deployed there, so an upgrade of Sentinel moves both.
+
 ### Kubernetes Workloads
 
 Staging and production run on Kubernetes. This section maps the process roles
@@ -1708,6 +1765,13 @@ capability, privilege escalation, or privileged port; the API listens on port
 8000. Run every workload with the settings of the Pod Security `restricted`
 profile: `runAsNonRoot: true`, `seccompProfile: RuntimeDefault`,
 `allowPrivilegeEscalation: false`, and `capabilities.drop: [ALL]`.
+
+**Routing.** An Ingress or a Gateway API HTTPRoute implements the routing of
+the [Sentinel Host](#sentinel-host) with two path-prefix rules: `/api` to the
+API server's Service and `/` to the UI's Service. Both kinds of rule match a
+prefix by whole path segment and prefer the longest matching prefix, so every
+path under `/api` reaches the API. The liveness and readiness probes address
+the API pods, not the host.
 
 **Upgrades.** The stop-the-world deployment model of
 [Migration Failure Recovery](#migration-failure-recovery) applies: scale every
@@ -1880,6 +1944,9 @@ Configure your orchestrator to use these endpoints:
 
 - **Docker**: `healthcheck` directive in compose file or Dockerfile
 - **Kubernetes**: `livenessProbe` → `/health`, `readinessProbe` → `/ready`
+
+Probes reach the API process directly, never through the Sentinel host,
+where these paths belong to the UI (see [Sentinel Host](#sentinel-host)).
 
 The orchestrator MUST set `timeoutSeconds` (Kubernetes) or `timeout`
 (Docker) to at least 5 seconds to accommodate the internal check

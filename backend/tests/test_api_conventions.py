@@ -32,7 +32,7 @@ forbids. That cross-reference remains with `@docs-reviewer` /
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import UnionType
 from typing import Annotated, Any, Final, Literal, Union, get_args, get_origin
@@ -44,6 +44,7 @@ from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, Strict
 from pydantic.fields import FieldInfo
+from starlette.routing import BaseRoute
 
 from app.api.dependencies import drain_ticket_convergence_after_commit
 from app.api.openapi import API_V1_RESPONSES
@@ -60,6 +61,10 @@ from app.schemas.errors import ErrorResponse
 # `{"status": "ok"}` directly) — see docs/api-spec.md Response Format,
 # which scopes the envelope to API endpoints.
 _PREFIX_EXEMPT_PATHS = {"/health", "/ready"}
+
+# Every path the application serves starts with this prefix, except the
+# probes above — see `docs/api-spec.md` (Base URL).
+_API_PATH_PREFIX: Final = "/api/"
 
 # The only HTTP methods used across the documented API surface — see
 # `docs/api-spec.md` (Mutation Patterns: PATCH/POST) and the CORS
@@ -161,6 +166,44 @@ class TestRoutePrefixConvention:
             and not info.path.startswith("/api/v1/")
         ]
         assert not violations, "\n".join(violations)
+
+
+def _paths_outside_api_prefix(routes: Sequence[BaseRoute]) -> list[str]:
+    """Every registered path of `routes`, of any route type, that is
+    neither under `_API_PATH_PREFIX` nor a probe."""
+    return sorted(
+        context.path
+        for context in fastapi_routing.iter_route_contexts(routes)
+        if context.path is not None
+        and context.path not in _PREFIX_EXEMPT_PATHS
+        and not context.path.startswith(_API_PATH_PREFIX)
+    )
+
+
+@pytest.mark.unit
+class TestServedPathPrefix:
+    """Every path the application serves starts with `/api/`, except the
+    probes, so that a host shared with the web UI routes only `/api` to the
+    API.
+
+    See `docs/api-spec.md` (Base URL) and `docs/deployment.md` (Sentinel
+    Host). Unlike `TestRoutePrefixConvention`, this covers the routes that
+    are not `APIRoute` instances: the OpenAPI document that FastAPI
+    registers and the interactive documentation page.
+    """
+
+    def test_every_served_path_is_under_api_or_a_probe(self) -> None:
+        assert _paths_outside_api_prefix(app.routes) == []
+
+    def test_framework_default_documentation_paths_are_detected(self) -> None:
+        """Self-test: FastAPI's own documentation routes are at the site
+        root, and the check reports each of them."""
+        assert _paths_outside_api_prefix(FastAPI().routes) == [
+            "/docs",
+            "/docs/oauth2-redirect",
+            "/openapi.json",
+            "/redoc",
+        ]
 
 
 @pytest.mark.unit

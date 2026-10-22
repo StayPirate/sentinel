@@ -31,7 +31,7 @@ class TestInteractiveDocumentation:
     async def test_docs_page_loads_only_the_pinned_swagger_ui_release(
         self, client: AsyncClient
     ) -> None:
-        response = await client.get("/docs")
+        response = await client.get("/api/docs")
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/html; charset=utf-8"
@@ -40,16 +40,29 @@ class TestInteractiveDocumentation:
             f"{SWAGGER_UI_DIST}swagger-ui-bundle.js",
             f"{SWAGGER_UI_DIST}swagger-ui.css",
         ]
-        assert "url: '/openapi.json'" in response.text
+        assert "url: '/api/openapi.json'" in response.text
         assert '"filter": true' in response.text
 
     async def test_openapi_document_is_served(self, client: AsyncClient) -> None:
-        response = await client.get("/openapi.json")
+        response = await client.get("/api/openapi.json")
 
         assert response.status_code == 200
         assert response.json()["info"]["title"] == "Sentinel"
 
-    @pytest.mark.parametrize("path", ["/redoc", "/docs/oauth2-redirect"])
+    @pytest.mark.parametrize("path", ["/openapi.json", "/docs"])
+    async def test_documentation_is_not_served_at_the_site_root(
+        self, client: AsyncClient, path: str
+    ) -> None:
+        """On a host shared with the web UI, every path outside `/api`
+        belongs to the UI (`docs/deployment.md`, Sentinel Host)."""
+        response = await client.get(path)
+
+        assert response.status_code == 404
+        assert response.json() == _ROUTE_NOT_FOUND
+
+    @pytest.mark.parametrize(
+        "path", ["/redoc", "/api/redoc", "/api/docs/oauth2-redirect"]
+    )
     async def test_framework_documentation_pages_are_not_served(
         self, client: AsyncClient, path: str
     ) -> None:
@@ -67,4 +80,4 @@ async def test_document_url_keeps_the_root_path() -> None:
 
     response = await swagger_ui_html(request)
 
-    assert "url: '/sentinel/openapi.json'" in bytes(response.body).decode()
+    assert "url: '/sentinel/api/openapi.json'" in bytes(response.body).decode()

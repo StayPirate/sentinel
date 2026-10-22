@@ -6,6 +6,13 @@
 
 All API endpoints are prefixed with `/api/v1/`.
 
+Every path that the API serves starts with `/api/`, the OpenAPI document and
+the interactive documentation page included (see OpenAPI Document and
+Interactive Documentation), except the probes `/health` and `/ready`
+(`docs/features/platform/health-endpoints.md`). A host that also serves the
+web UI therefore routes `/api` to the API and every other path to the UI
+(`docs/deployment.md`, Sentinel Host).
+
 ### Versioning
 
 The API uses URL-path versioning (`/api/v1/`). Only v1 exists at this time.
@@ -23,13 +30,14 @@ Rules:
 
 ### OpenAPI Document and Interactive Documentation
 
-The API serves, outside `/api/v1/` and without authentication:
+The API serves, under `/api/` but outside `/api/v1/`, and without
+authentication:
 
-- its OpenAPI document at `/openapi.json`; the image of a release, under its
-  default command, serves the document that the release asset carries
+- its OpenAPI document at `/api/openapi.json`; the image of a release, under
+  its default command, serves the document that the release asset carries
   (`docs/deployment.md`, API Documentation Publication); and
-- an interactive documentation page at `/docs`: a Swagger UI HTML page over
-  that document.
+- an interactive documentation page at `/api/docs`: a Swagger UI HTML page
+  over that document.
 
 Neither is an operation of the document, both ignore request credentials, and
 no other documentation viewer, such as ReDoc, is served.

@@ -1,4 +1,4 @@
-"""The interactive API documentation page, `GET /docs`.
+"""The interactive API documentation page, `GET /api/docs`.
 
 See `docs/api-spec.md` (OpenAPI Document and Interactive Documentation).
 FastAPI's own `/docs` and `/redoc` pages load the latest release of their

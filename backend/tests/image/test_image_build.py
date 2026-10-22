@@ -76,7 +76,7 @@ def test_default_api_command_serves_health_readiness_and_openapi(
         "checks": {"postgresql": "ok", "redis": "ok"},
     }
 
-    openapi = http_client.get("/openapi.json")
+    openapi = http_client.get("/api/openapi.json")
     assert openapi.status_code == 200
     assert openapi.json()["info"]["title"] == "Sentinel"
 
