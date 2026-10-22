@@ -3,7 +3,8 @@ boundaries.
 
 - `_reconcile_scope()` in `app/services/packages/ibs_request_reconciliation.py`
   is the only function that takes the Ticket row lock and is called only by
-  `_Reconciliation._apply()`; the request and action row locks are taken
+  `_Reconciliation._apply()` and the trusted observation application
+  `apply_ibs_request_observation()`; the request and action row locks are taken
   only by `_lock_request()` and `_lock_actions()`, which only the locked
   unit reaches (docs/features/packages/ibs-submission-tracking.md, Shared
   Authoritative Reconciliation > Algorithm steps 4-10: no IBS, Redis,
@@ -13,8 +14,14 @@ boundaries.
 - The functions of the locked unit reference no IBS client, evidence
   cache, HTTP, broker, or session factory, and never commit, roll back, or
   close the caller-owned unit.
-- The scope selection and the retained-evidence reader take no lock and
+- The scope selection and the retained-evidence readers take no lock and
   never write or end their transaction.
+- `apply_ibs_request_observation()` performs no IBS, HTTP, broker, or
+  Redis I/O, opens no session, and never commits, rolls back, or closes
+  the caller's session; outside its own module, only the example dataset
+  loader `app/services/example_dataset.py` references it
+  (ibs-submission-tracking.md, Trusted Observation Application; Testing
+  Requirements).
 - The lock-free observation module (`ibs_request_observation.py`) has no
   database dependency at all.
 - The fetcher module `sync_ibs_requests.py` takes no row lock, opens no
@@ -54,6 +61,8 @@ _FOR_UPDATE: Final = re.compile(r"\bfor\s+(no\s+key\s+)?update\b", re.IGNORECASE
 
 _LOCKING: Final = "_reconcile_scope"
 _APPLY: Final = "_Reconciliation._apply"
+_TRUSTED: Final = "apply_ibs_request_observation"
+_TRUSTED_CALLER: Final = "services/example_dataset.py"
 _ROW_LOCKERS: Final = ("_lock_request", "_lock_actions")
 _LOCKED_UNIT: Final = (
     _LOCKING,
@@ -65,7 +74,18 @@ _LOCKED_UNIT: Final = (
     "_apply_delivery",
 )
 """The functions that run inside the locked unit."""
-_READERS: Final = ("load_ibs_request_scopes", "read_retained_actions")
+_READERS: Final = (
+    "load_ibs_request_scopes",
+    "read_retained_actions",
+    "_read_trusted_scope",
+)
+_TRUSTED_UNIT: Final = (
+    _TRUSTED,
+    "_read_trusted_scope",
+    "_validate_trusted_observation",
+    "_satisfies_action_structure",
+)
+"""The trusted observation application and its own helpers."""
 
 _IO_NAMES: Final = {
     "httpx",
@@ -209,8 +229,9 @@ class TestLockPlacement:
         assert sites == {_LOCKING, *_ROW_LOCKERS}
 
     def test_the_locked_unit_is_entered_only_through_apply(self) -> None:
-        assert _callers(_LOCKING) == [
-            ("services/packages/ibs_request_reconciliation.py", _APPLY)
+        assert sorted(_callers(_LOCKING), key=str) == [
+            ("services/packages/ibs_request_reconciliation.py", _APPLY),
+            ("services/packages/ibs_request_reconciliation.py", _TRUSTED),
         ]
         assert {caller for _, caller in _callers("_write_evidence")} == {_LOCKING}
         assert {caller for _, caller in _callers("_lock_request")} == {"_write_request"}
@@ -239,6 +260,66 @@ class TestLockedUnitBody:
 
         assert "with_for_update" not in _referenced_names(body)
         assert _called_attributes(body) & _WRITES == set()
+
+
+def _references(tree: ast.AST, name: str) -> bool:
+    """Whether `tree` references `name` through a name, an attribute, or an
+    import alias."""
+    return any(
+        (isinstance(node, ast.Name) and node.id == name)
+        or (isinstance(node, ast.Attribute) and node.attr == name)
+        or (isinstance(node, ast.alias) and node.name == name)
+        for node in ast.walk(tree)
+    )
+
+
+def _referencing_modules(name: str) -> set[str]:
+    """Every application module that references `name`."""
+    return {
+        str(path.relative_to(APP_ROOT))
+        for path in sorted(APP_ROOT.rglob("*.py"))
+        if _references(_tree(path), name)
+    }
+
+
+@pytest.mark.unit
+class TestTrustedObservationApplication:
+    def test_only_the_example_dataset_loader_references_it(self) -> None:
+        """The defining module only defines it (and names it in `__all__`,
+        a string), so it is not among the referencing modules."""
+        assert _referencing_modules(_TRUSTED) == {_TRUSTED_CALLER}
+
+    @pytest.mark.parametrize("name", _TRUSTED_UNIT)
+    def test_performs_no_ibs_http_broker_or_redis_io(self, name: str) -> None:
+        body = _functions(_tree(_BOUNDARY))[name]
+
+        assert _referenced_names(body) & _IO_NAMES == set()
+
+    @pytest.mark.parametrize("name", _TRUSTED_UNIT)
+    def test_never_commits_rolls_back_or_closes_the_session(self, name: str) -> None:
+        body = _functions(_tree(_BOUNDARY))[name]
+
+        assert _called_attributes(body) & {"commit", "rollback", "close"} == set()
+
+    def test_takes_no_lock_of_its_own(self) -> None:
+        body = _functions(_tree(_BOUNDARY))[_TRUSTED]
+
+        assert "with_for_update" not in _referenced_names(body)
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            (f"from x import {_TRUSTED} as renamed\n", True),
+            (f"import x\nx.{_TRUSTED}()\n", True),
+            (f"{_TRUSTED}()\n", True),
+            ("from x import apply_ibs_requests\n", False),
+        ],
+        ids=["import-alias", "attribute", "name", "other-name"],
+    )
+    def test_reference_detection_finds_every_form(
+        self, source: str, expected: bool
+    ) -> None:
+        assert _references(ast.parse(source), _TRUSTED) is expected
 
 
 @pytest.mark.unit

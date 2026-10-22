@@ -636,7 +636,9 @@ async def upsert_references(
     Q1: `ticket_id` is the internal UUID of the Ticket established by the
     CVE ingestion workflow; `cve_id` is the canonical CVE ID, used only for
     rejection logging; `source` is the calling fetcher's stable
-    `BaseFetcher.name`; `source_reference` is the optional source
+    `BaseFetcher.name` (the example dataset loader passes the name of the
+    fetcher whose source its data represents); `source_reference` is the
+    optional source
     candidate; `upstream_references` are the upstream candidates in their
     original order.
 

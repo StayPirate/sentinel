@@ -2236,7 +2236,9 @@ async def set_product_released_at(
     Category A system mutation (package-service.md,
     `set_product_released_at()`; package-model.md, Product Release
     Confirmation). Callers are the IBS Product release detection tasks
-    only; there is no user-attributed form and no auto-assignment.
+    and the example dataset loader, which confirms a fictional release in
+    their place (example-dataset.md); there is no user-attributed form and
+    no auto-assignment.
 
     Q1: `ticket_id`, `package_id`, `track_id`, `ticket_package_product_id`
     are the declared semantic locator (the last is a

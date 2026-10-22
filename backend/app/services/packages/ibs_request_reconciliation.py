@@ -25,6 +25,11 @@ the package-add catch-up, and the RabbitMQ request wake-ups:
   number (`FOR NO KEY UPDATE` or `INSERT ... ON CONFLICT`), then actions in
   identity order, then correlations, and applies the derived delivery
   through `package_service.set_track_delivery_status()`.
+- `apply_ibs_request_observation()` (Trusted Observation Application)
+  applies one complete observation that its caller supplies, without IBS,
+  through the same step-1 snapshot and locked unit in the caller's
+  transaction. Its only caller is the example dataset loader
+  (docs/features/platform/example-dataset.md).
 
 The per-outcome hook (periodic metrics) runs once for every terminal
 outcome: immediately for an incomplete or failed observation, and after the
@@ -42,6 +47,7 @@ registers a Ticket convergence effect, so no drain exists.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Sequence
@@ -61,7 +67,7 @@ from app.core.enums import (
     IBSRequestState,
     WorkflowType,
 )
-from app.core.exceptions import TicketNotMutableError
+from app.core.exceptions import ServiceError, TicketNotMutableError
 from app.database import async_session_factory
 from app.models.cve import CVE
 from app.models.ibs_request import IBSRequest
@@ -71,8 +77,14 @@ from app.models.ticket import Ticket
 from app.models.ticket_package import TicketPackage
 from app.models.ticket_package_track import TicketPackageTrack
 from app.services import package_service
-from app.services.ibs_client import IBSClient
-from app.services.packages.ibs_request_identity import ActionKey, action_key
+from app.services.ibs_client import IBSClient, IBSRequestActionDetail
+from app.services.packages.ibs_request_identity import (
+    ActionKey,
+    ActionMatch,
+    action_identity,
+    action_key,
+    classify_action,
+)
 from app.services.packages.ibs_request_observation import (
     SUSE_NAMESPACE,
     ActionWrite,
@@ -90,10 +102,13 @@ from app.services.packages.ibs_request_observation import (
 from app.services.ticket_mutations import ensure_ticket_operable
 
 __all__ = [
+    "IBSObservationRejectedError",
     "IBSRequestOutcome",
     "IBSRequestOutcomeHook",
     "IBSRequestOutcomeKind",
     "IBSRequestScope",
+    "ObservationApplication",
+    "apply_ibs_request_observation",
     "load_ibs_request_scopes",
     "read_retained_actions",
     "read_retained_identities",
@@ -660,6 +675,213 @@ def _definitely_failed(exc: DBAPIError) -> bool:
         not exc.connection_invalidated
         and isinstance(sqlstate, str)
         and not sqlstate.startswith(_CONNECTION_EXCEPTION_CLASS)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Trusted observation application
+# ---------------------------------------------------------------------------
+
+ObservationApplication = Literal["created", "updated", "no_op"]
+"""The result of `apply_ibs_request_observation()`."""
+
+_SRCMD5: Final = re.compile(r"[0-9a-f]{32}")
+
+
+class IBSObservationRejectedError(ServiceError):
+    """Locked revalidation or a conditional upsert rejected a supplied
+    observation (ibs-submission-tracking.md, Trusted Observation
+    Application).
+
+    Inherits directly from `ServiceError`. `category` is one bounded
+    category of Structured Logs (`scope_changed`,
+    `stale_request_observation`, `conflicting_observation`, or
+    `conflicting_provenance`), and the message names only that category.
+    No API handler receives it.
+    """
+
+    def __init__(self, category: str) -> None:
+        super().__init__(f"IBS request observation rejected: {category}")
+        self.category = category
+
+
+async def apply_ibs_request_observation(
+    db: AsyncSession,
+    *,
+    track_id: uuid.UUID,
+    observation: Observation,
+) -> ObservationApplication:
+    """Apply one complete observation that the caller supplies, without
+    IBS, to one IBS track.
+
+    Category A composable service function (ibs-submission-tracking.md,
+    Trusted Observation Application). Its only caller is the example
+    dataset loader (docs/features/platform/example-dataset.md).
+
+    Q1: `track_id` is the `TicketPackageTrack.id` of the scope.
+    `observation` has the form of Algorithm step 3: the derived delivery
+    value and the request and action evidence in the stored form. The
+    caller asserts that it is complete and that its delivery value is the
+    one Delivery Derivation yields for its evidence; neither can be
+    verified here.
+
+    Q2: before any write, reads the scope of `track_id` and raises
+    `ValueError` when the track does not exist, its workflow is not `ibs`,
+    or its Ticket is not active, and when an action belongs to a request
+    number the observation has no request for, does not satisfy the
+    structural requirements of IBSRequestAction, has a semantic identity
+    that differs from the identity of its own fields, or does not represent
+    the scope's logical package and codestream.
+
+    Q3: in the caller's transaction, reads the scope's step-1 snapshot with
+    no lock, then runs Algorithm steps 4-9 through `_reconcile_scope()`:
+    Ticket lock, locked revalidation, conditional request and action
+    upserts, correlation of every action to the track, delivery derivation
+    under the stale-negative guard, and delivery application through
+    `package_service.set_track_delivery_status()`. Flushes; never commits
+    or rolls back; performs no IBS, Redis, AMQP, or Celery I/O and
+    registers no post-commit effect.
+
+    Q4: returns `created`, `updated`, or `no_op`. Creates no audit event.
+
+    Q5: idempotent; the same observation applied again returns `no_op`.
+
+    Q6: `ValueError` for the guards; `TicketNotMutableError` for a Ticket
+    that became `Ignored` or `Duplicated` before the lock;
+    `IBSObservationRejectedError` when locked revalidation finds a stale
+    scope (`scope_changed`) or a conditional upsert rejects the
+    observation; `InvalidDeliveryStatusTransition`; database and flush
+    exceptions. The caller rolls back on every exception.
+    """
+    scope, delivery = await _read_trusted_scope(db, track_id)
+    _validate_trusted_observation(scope, observation)
+    snapshot = _snapshot(
+        delivery,
+        await read_retained_actions(
+            db, package_name=scope.package_name, codestream=scope.codestream
+        ),
+        (await _read_correlations(db, [scope.track_id])).get(scope.track_id, []),
+    )
+    try:
+        result = await _reconcile_scope(db, scope, snapshot, observation)
+    except _LocalFailure as exc:
+        raise IBSObservationRejectedError(exc.category) from None
+    if result.stale is not None:
+        raise IBSObservationRejectedError(result.stale)
+    return result.kind
+
+
+async def _read_trusted_scope(
+    db: AsyncSession, track_id: uuid.UUID
+) -> tuple[IBSRequestScope, DeliveryStatus]:
+    """The scope of `track_id` and its persisted delivery; raises
+    `ValueError` for a missing track, a track that is not `ibs`, or an
+    inactive Ticket. Takes no lock and never writes."""
+    row = (
+        await db.execute(
+            select(
+                Ticket.id.label("ticket_id"),
+                Ticket.status,
+                CVE.cve_id,
+                TicketPackage.id.label("package_id"),
+                TicketPackage.package_name,
+                TicketPackageTrack.workflow_type,
+                TicketPackageTrack.reference,
+                TicketPackageTrack.delivery_status,
+            )
+            .select_from(TicketPackageTrack)
+            .join(
+                TicketPackage, TicketPackage.id == TicketPackageTrack.ticket_package_id
+            )
+            .join(Ticket, Ticket.id == TicketPackage.ticket_id)
+            .outerjoin(CVE, CVE.id == Ticket.cve_id)
+            .where(TicketPackageTrack.id == track_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise ValueError("The track does not exist.")
+    if row.workflow_type != WorkflowType.IBS.value:
+        raise ValueError("The track is not an IBS track.")
+    if row.status not in ACTIVE_TICKET_STATUSES:
+        raise ValueError("The Ticket of the track is not active.")
+    scope = IBSRequestScope(
+        ticket_id=row.ticket_id,
+        cve_id=row.cve_id,
+        package_id=row.package_id,
+        package_name=row.package_name,
+        track_id=track_id,
+        codestream=row.reference,
+    )
+    return scope, DeliveryStatus(row.delivery_status)
+
+
+def _validate_trusted_observation(
+    scope: IBSRequestScope, observation: Observation
+) -> None:
+    """The action guards of Trusted Observation Application."""
+    states = {request.request_number: request.state for request in observation.requests}
+    for action in observation.actions:
+        state = states.get(action.request_number)
+        if state is None:
+            raise ValueError("An action belongs to a request the observation lacks.")
+        if not _satisfies_action_structure(action):
+            raise ValueError("An action does not satisfy the action structure.")
+        if action.key != action_key(
+            action.request_number,
+            action.action_type,
+            source_project=action.source_project,
+            source_package=action.source_package,
+            target_project=action.target_project,
+            target_package=action.target_package,
+            target_release_project=action.target_release_project,
+        ):
+            raise ValueError("An action identity differs from its own fields.")
+        detail = IBSRequestActionDetail(
+            request_number=action.request_number,
+            action_type=action.action_type,
+            source_project=action.source_project,
+            source_package=action.source_package,
+            target_project=action.target_project,
+            target_package=action.target_package,
+            target_release_project=action.target_release_project,
+        )
+        match = classify_action(
+            detail,
+            action_identity(detail, accepted=state is IBSRequestState.ACCEPTED),
+            package_name=scope.package_name,
+            codestream=scope.codestream,
+        )
+        if (
+            match is not ActionMatch.MATCHING
+            or action.logical_package != scope.package_name
+            or action.codestream_name != scope.codestream
+        ):
+            raise ValueError("An action does not represent the scope's package.")
+
+
+def _satisfies_action_structure(action: ActionWrite) -> bool:
+    """The type-specific structural requirements and column constraints of
+    IBSRequestAction (ibs-submission-tracking.md, Data Model)."""
+    if action.incident_number is not None and action.incident_number <= 0:
+        return False
+    if action.accepted_srcmd5 is not None and not _SRCMD5.fullmatch(
+        action.accepted_srcmd5
+    ):
+        return False
+    if action.action_type is IBSRequestActionType.MAINTENANCE_INCIDENT:
+        return (
+            action.source_project is not None
+            and action.source_package is not None
+            and action.target_release_project is not None
+            and action.codestream_name == action.target_release_project
+        )
+    return (
+        action.source_project is not None
+        and action.source_package is not None
+        and action.target_project is not None
+        and action.target_package is not None
+        and action.incident_number is not None
+        and action.codestream_name == action.target_project
     )
 
 
