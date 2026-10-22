@@ -59,7 +59,7 @@ subagent is a **read-only reviewer**: it analyzes code or specifications and
 reports findings without modifying files. All writing is owned by the primary
 agents; the built-in `general` task writes only on the Code agent's behalf,
 within a brief that excludes Git workflow, GitHub mutations, `docs/**` edits,
-reviewer invocation, new dependencies outside the approved plan, and gap or
+reviewer invocation, new dependencies the user has not admitted, and gap or
 delegated decisions.
 
 All reviewer agents apply the proportionality filter in `AGENTS.md`

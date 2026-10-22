@@ -46,7 +46,8 @@ including those discovered during implementation after the plan was approved:
 evaluate the options, decide, record the decision, align the specification in
 the same PR when the decision refines an existing contract, and disclose it in
 the pre-PR report. Anything outside that delegation, or uncertain, follows the
-protocol below.
+protocol below, except a new dependency, which follows `AGENTS.md` (New
+dependencies) instead.
 
 When a gap exists:
 
@@ -112,8 +113,8 @@ brief would cost more than it saves.
   your conversation.
 - Instruct each task not to start the Git workflow, commit, push, perform
   GitHub mutations, edit `docs/**`, invoke reviewers, add a new dependency
-  that the approved plan does not include, or take gap or delegated
-  decisions; it reports any such need in its result instead.
+  that the user has not admitted (`AGENTS.md`, New dependencies), or take gap
+  or delegated decisions; it reports any such need in its result instead.
 - After each task, inspect its diff and rerun the focused checks yourself
   before continuing. The task's summary is context, not evidence.
 
