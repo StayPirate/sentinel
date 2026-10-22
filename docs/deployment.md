@@ -1674,8 +1674,8 @@ and running on all hosts.
 
 Staging and production each serve Sentinel to browsers from one host,
 `sentinel-staging.suse.de` and `sentinel.suse.de` respectively, which serves
-both the API and the web UI. The UI is not a process role of this image: the separate
-`sentinel-aura` repository releases it as its own OCI image
+both the API and the web UI. The UI is not a process role of this image: the
+separate `sentinel-aura` repository releases it as its own OCI image
 (`docs/architecture.md`, System Boundary). Served from the API's origin, the
 UI receives the session cookie and passes Cross-Origin Request Protection
 without a `CORS_ORIGINS` entry (`docs/features/identity/authentication.md`,
@@ -1705,16 +1705,18 @@ The reverse proxy or ingress of the host meets these requirements:
   `preload`: the HSTS preload list covers whole registrable domains, such as
   `suse.de`, not a single host.
 - **Response headers.** The proxy neither removes nor changes the headers
-  that the API and the UI image set on their responses; the UI image sets the
-  other security headers of its own responses.
+  that the API and the UI image set on their responses.
 
-The request headers that reach the API and the `Cookie` header that no
-component logs are covered by the
-[Pre-Production Checklist](#pre-production-checklist).
+Requests reach the API with the `Host`, `Origin`, and `Sec-Fetch-Site`
+headers unchanged, and no component of the host logs the `Cookie` header
+(`docs/features/identity/authentication.md`, Cross-Origin Request Protection
+and Session cookie); the
+[Pre-Production Checklist](#pre-production-checklist) verifies both.
 
-**Versions.** The UI declares the one Sentinel version that it supports. The
-UI release deployed on a host is the one that supports the Sentinel version
-deployed there, so an upgrade of Sentinel moves both.
+**Versions.** Each UI release supports one exact Sentinel version, which the
+`sentinel-aura` repository declares. The UI release deployed on a host is the
+one that supports the Sentinel version deployed there, so an upgrade of
+Sentinel moves both.
 
 ### Kubernetes Workloads
 

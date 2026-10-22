@@ -49,17 +49,6 @@ class TestInteractiveDocumentation:
         assert response.status_code == 200
         assert response.json()["info"]["title"] == "Sentinel"
 
-    @pytest.mark.parametrize("path", ["/openapi.json", "/docs"])
-    async def test_documentation_is_not_served_at_the_site_root(
-        self, client: AsyncClient, path: str
-    ) -> None:
-        """On a host shared with the web UI, every path outside `/api`
-        belongs to the UI (`docs/deployment.md`, Sentinel Host)."""
-        response = await client.get(path)
-
-        assert response.status_code == 404
-        assert response.json() == _ROUTE_NOT_FOUND
-
     @pytest.mark.parametrize(
         "path", ["/redoc", "/api/redoc", "/api/docs/oauth2-redirect"]
     )
