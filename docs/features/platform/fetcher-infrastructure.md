@@ -3608,7 +3608,8 @@ sequence. The routine executes a batch
 `INSERT ... ON CONFLICT DO NOTHING` (on the PK `fetcher_name`) for
 every fetcher in `FETCHER_REGISTRY`, guaranteeing safety when multiple
 processes start concurrently (common in Kubernetes multi-replica
-deployments).
+deployments). The example dataset loader also calls it, before it disables
+every fetcher (`docs/features/platform/example-dataset.md`).
 
 The bootstrap routine:
 - **Location**: `backend/app/services/fetcher_bootstrap.py`

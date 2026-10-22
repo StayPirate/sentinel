@@ -521,7 +521,9 @@ defined in `ibs-submission-tracking.md`
 The delivery status is updated only by the shared authoritative IBS request
 reconciliation. IBS RabbitMQ events, package-add catch-up, Ticket-convergence
 catch-up, and the daily `SyncIbsRequests` fetcher all invoke that same
-reconciliation and cannot establish different results.
+reconciliation and cannot establish different results. The example dataset
+loader applies fictional evidence through the same locked reconciliation steps
+([Trusted Observation Application](ibs-submission-tracking.md#trusted-observation-application)).
 
 The two axes are independent — see
 [Affectedness-Delivery Independence](#affectedness-delivery-independence).
@@ -763,7 +765,9 @@ whether any actionable Product under it has `eligible = true`.
 |------|----|------------|---------|
 | `AFFECTED` or `ANALYSIS` | `FIXED` | TicketPackageTrack | Track release detection finds qualifying canonical Ticket-CVE evidence in an expanded source diff |
 
-Track release detection requests only `FIXED`. `ANALYSIS` and `AFFECTED` are
+Track release detection requests only `FIXED`. The example dataset loader
+requests the same transition for a fictional IBS track in its place
+(`package-service.md`, `set_track_status()`). `ANALYSIS` and `AFFECTED` are
 the only automatic source states that can change. If external I/O began while
 one of those states was present but the locked state is now `NOT_AFFECTED`,
 `FIXED`, or `WONT_FIX`, the request is a protected no-op. Successful source
@@ -1294,7 +1298,8 @@ An authorized user manages packages at the **package level only**:
   [Exclusion and Actionability](#exclusion-and-actionability)).
 - The user **cannot** add individual tracks or products — these are
   determined exclusively by SMELT when a package is added via
-  `add_package_to_ticket`.
+  `add_package_to_ticket`, or supplied by the example dataset loader in its
+  place (`docs/features/platform/example-dataset.md`).
 - The user **can** change the affectedness status of individual tracks
   (via the status dropdown) and override the eligibility of individual
   products.

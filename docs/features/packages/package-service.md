@@ -340,6 +340,11 @@ complete per-track unit and closes its session, the release-detection owner
 drains any Ticket convergence effect under `ticket-service.md` (Publication
 policies); this service never publishes while holding the Ticket lock.
 
+The example dataset loader is the only other system caller: it requests
+`FIXED` for a fictional IBS track in place of track release detection and
+writes no `TrackReleaseCheckpoint`
+(`docs/features/platform/example-dataset.md`).
+
 ---
 
 ### `set_track_delivery_status()`
@@ -480,8 +485,10 @@ correction, disappearance, repository failure, or no-match does not reverse or
 replace that accepted factual observation. Soft-deletion remains an independent
 manual exclusion decision and is not a release-correction mechanism.
 
-**Callers**: IBS product release detection tasks only
-(`acting_user_id` is always `None`; auto-assignment does not apply).
+**Callers**: IBS product release detection tasks, and the example dataset
+loader, which confirms a fictional release in place of that detection
+(`docs/features/platform/example-dataset.md`). `acting_user_id` is always
+`None`; auto-assignment does not apply.
 
 **Product-release composition**: the detector completes repository I/O,
 integrity validation, parsing, matching, and timestamp selection before this
@@ -792,7 +799,10 @@ the delegated contracts.
 
 Creates `TicketPackage`, `TicketPackageTrack`, and
 `TicketPackageProduct` records for a package being added to a ticket.
-Called by `add_package_to_ticket` after SMELT resolution completes.
+Called by `add_package_to_ticket` after SMELT resolution completes. The example
+dataset loader also calls it directly, as a user-attributed invocation whose
+fictional track, Product, and maintainer data take the place of SMELT
+resolution (`docs/features/platform/example-dataset.md`).
 
 **Parameters**:
 

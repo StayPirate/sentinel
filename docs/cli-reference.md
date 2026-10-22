@@ -234,3 +234,29 @@ sentinel api-key revoke --key-id <uuid>
 ```
 
 **Idempotency**: Idempotent (no-op if already revoked).
+
+## `sentinel example-data`
+
+Fictional example dataset for local development and test environments only,
+never for staging or production. See
+[Loading the Example Dataset](deployment.md#loading-the-example-dataset) in
+`docs/deployment.md` for the procedure.
+
+Full specification:
+[example-dataset](features/platform/example-dataset.md#command)
+
+### `sentinel example-data load`
+
+Loads the fictional example dataset into a newly created, migrated database.
+Refuses a database that holds users, tickets, CVEs, or products. Every
+dataset user has the documented password `example-dataset-password`.
+
+```
+sentinel example-data load
+```
+
+Reports each step with `✓`, `✗`, and `—`. A failed step may leave a partial
+dataset; recreate the database before loading again.
+
+**Idempotency**: Not idempotent (by design): a repeated invocation is refused
+because the database is no longer empty.

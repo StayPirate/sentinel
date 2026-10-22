@@ -70,7 +70,9 @@ operation.
 the authenticated user (obtained via `Depends()`) as `acting_user_id`.
 Passing `None` from an API handler is a bug — it would silently bypass
 all self-operation guards. `None` is reserved exclusively for system
-entry points (external sync, Celery tasks, CLI commands).
+entry points (external sync, Celery tasks, CLI commands). The example dataset
+load passes the dataset user that stands for the authenticated caller
+(`docs/features/platform/example-dataset.md`, Attribution).
 
 ## External User Data Ownership
 
@@ -592,7 +594,9 @@ additional records.
 
 **TicketAuditEvent**: none (user creation does not affect tickets)
 
-**IdentityAuditEvent**: `user_created` — `user_id` = acting API user or NULL
+**IdentityAuditEvent**: `user_created` — `user_id` = acting API user, the
+acting dataset user of the example dataset load
+(`docs/features/identity/identity-audit-log.md`, Actor Contract), or NULL
 for CLI/external synchronization,
 `target_user_id` = created user, `new_value` = username. Additionally,
    one `role_added` event per initial role assigned (see step 8). All events

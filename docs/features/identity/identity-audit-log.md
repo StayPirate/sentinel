@@ -23,7 +23,7 @@ Inherits `id`, `created_at`, and `user_id` from `AuditEventMixin`.
 |---|---|---|---|
 | id | UUID | Inherited from AuditEventMixin | Internal identifier |
 | event_type | VARCHAR(50) | NOT NULL | See IdentityAuditEventType |
-| user_id | UUID | Inherited from AuditEventMixin | Authenticated Sentinel user who performed the action. NULL when no authenticated Sentinel actor exists, including CLI, task/system, and external-sync workflows |
+| user_id | UUID | Inherited from AuditEventMixin | Authenticated Sentinel user who performed the action. NULL when no authenticated Sentinel actor exists, including CLI, task/system, and external-sync workflows, except the example dataset load (see Actor Contract) |
 | target_user_id | UUID | FK(user.id), nullable | The user affected by the action. NULL for role mapping events (which affect configuration, not a specific user) |
 | old_value | TEXT | nullable | Previous state (human-readable) |
 | new_value | TEXT | nullable | New state (human-readable) |
@@ -60,6 +60,7 @@ a CLI invocation.
 | Authenticated API operation | Authenticated user's UUID; API handlers MUST NOT pass NULL |
 | Self-service API key creation | Key owner's UUID |
 | CLI workflow | NULL |
+| Example dataset load | NULL for the first dataset administrator's creation; otherwise the dataset user that stands for the authenticated caller (`docs/features/platform/example-dataset.md`, Attribution) |
 | Celery task or other system automation | NULL |
 | External provisioning synchronization | NULL |
 

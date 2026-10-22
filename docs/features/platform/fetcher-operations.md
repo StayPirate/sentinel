@@ -520,6 +520,11 @@ After the API workflow commits the transaction containing
 No Redis or network I/O occurs while the `FetcherConfig` row lock is
 held. The lock is released at commit (step before propagation).
 
+The example dataset loader commits each fetcher it disables and applies no
+propagation: it runs before Celery Beat starts, and Beat's startup
+reconciliation builds the schedule from PostgreSQL
+(`docs/features/platform/example-dataset.md`).
+
 **No-op PATCH limitation**: a PATCH that submits only values identical
 to the current state is a no-op (step 8) and does NOT trigger RedBeat
 propagation. This means a no-op PATCH cannot be used to repair a missing

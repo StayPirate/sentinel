@@ -680,8 +680,9 @@ See `docs/features/tickets/cvss-scoring.md` for the full specification.
 
 Tracks external vulnerability identifiers (e.g., GHSA-ID) mapped to a
 CVE by their respective naming authority. External identifiers are
-populated exclusively by fetchers — there is no user-facing CRUD. The
-CVE remains the sole canonical identifier in Sentinel.
+populated exclusively by fetchers, or by the example dataset loader in their
+place (`docs/features/platform/example-dataset.md`) — there is no user-facing
+CRUD. The CVE remains the sole canonical identifier in Sentinel.
 
 | Column     | Type                                   | Constraints             | Description                              |
 |------------|----------------------------------------|-------------------------|------------------------------------------|
@@ -1527,7 +1528,7 @@ process and cannot be removed via the API. See
 | user_id      | UUID        | FK(user.id), NOT NULL        | Associated user                  |
 | role         | VARCHAR(30) | NOT NULL                     | Role: Admin, Vulnerability Analyst, Restricted Analyst. See Role Enum |
 | group_name   | VARCHAR(256) | NOT NULL, DEFAULT `'_manual'` | External group name that granted this role, or `_manual` for manual assignments |
-| assigned_by  | UUID        | FK(user.id), nullable        | User who assigned the role. NULL for system actions (external sync, CLI) |
+| assigned_by  | UUID        | FK(user.id), nullable        | User who assigned the role. NULL for system actions (external sync, CLI), except the example dataset load (`docs/features/platform/example-dataset.md`, Attribution) |
 | created_at   | TIMESTAMPTZ   | NOT NULL, DEFAULT            | When the role was assigned       |
 
 **Unique constraint**: (user_id, role, group_name)
@@ -1663,7 +1664,7 @@ Inherits `id`, `created_at`, and `user_id` from `AuditEventMixin`.
 |---|---|---|---|
 | id | UUID | Inherited from AuditEventMixin | Internal identifier |
 | event_type | VARCHAR(50) | NOT NULL | See IdentityAuditEventType enum below |
-| user_id | UUID | Inherited from AuditEventMixin | Authenticated Sentinel actor. NULL for CLI, task/system, and external-sync workflows |
+| user_id | UUID | Inherited from AuditEventMixin | Authenticated Sentinel actor. NULL for CLI, task/system, and external-sync workflows, except the example dataset load (`docs/features/identity/identity-audit-log.md`, Actor Contract) |
 | target_user_id | UUID | FK(user.id), nullable | The user affected by the action. NULL for role mapping events |
 | old_value | TEXT | nullable | Previous state (human-readable). Length constraints defined by the event type contract — see `docs/features/identity/identity-audit-log.md` |
 | new_value | TEXT | nullable | New state (human-readable). Length constraints defined by the event type contract — see `docs/features/identity/identity-audit-log.md` |

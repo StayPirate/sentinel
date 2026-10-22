@@ -728,6 +728,12 @@ caller-supplied session (for example `BaseFetcher.run()`) keeps the transaction
 contract defined by its owning specification; this rule does not convert such
 orchestrators into caller-owned services.
 
+The catalog publication boundaries are the one named exception that receives a
+caller's session: each receives a session with no open transaction, then
+begins and commits its own publication transaction
+(`docs/features/packages/product-catalog.md`, Catalog Publication
+Boundaries).
+
 External effects remain outside the PostgreSQL transaction. A service may
 return the data needed for a post-commit effect, but the workflow owner invokes
 that effect only after its database commit succeeds and the row lock is

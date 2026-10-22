@@ -58,7 +58,10 @@ It is the final database backstop for all concurrent writers.
 `manual` is reserved for rows created and managed by the manual consumer
 functions. An automatic caller must pass its stable
 `BaseFetcher.name`, which must be non-empty, no longer than 100 characters, and
-must not equal `manual`. Renaming a fetcher requires a data migration for its
+must not equal `manual`. The example dataset loader is the only automatic
+caller that is not a fetcher: it passes the name of the fetcher whose source
+its fictional data represents (`docs/features/platform/example-dataset.md`).
+Renaming a fetcher requires a data migration for its
 existing `TicketReference.source` values; otherwise its old rows would become
 different-source rows under the merge rules below.
 
