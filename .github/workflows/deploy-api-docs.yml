@@ -62,6 +62,7 @@ jobs:
                 url: "./openapi.json",
                 dom_id: "#swagger-ui",
                 deepLinking: true,
+                filter: true,
                 presets: [
                   SwaggerUIBundle.presets.apis,
                   SwaggerUIBundle.SwaggerUIStandalonePreset
