@@ -22,7 +22,7 @@ Check):
   description is where a client learns which codes a status carries.
 
 A request that selects no documented operation, such as a routing response
-(`docs/api-spec.md`, Routing Responses) or `/openapi.json`, is not checked,
+(`docs/api-spec.md`, Routing Responses) or `/api/openapi.json`, is not checked,
 and neither is the diagnostic `500` that replaces `INTERNAL_ERROR` when
 `DEBUG` is enabled (`docs/api-spec.md`, Response Format). Formats that
 `jsonschema` cannot check without optional packages, such as `date-time`,

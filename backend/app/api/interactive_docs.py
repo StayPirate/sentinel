@@ -1,4 +1,4 @@
-"""The interactive API documentation page, `GET /docs`.
+"""The interactive API documentation page, `GET /api/docs`.
 
 See `docs/api-spec.md` (OpenAPI Document and Interactive Documentation).
 FastAPI's own `/docs` and `/redoc` pages load the latest release of their
@@ -28,9 +28,11 @@ the same version."""
 async def swagger_ui_html(request: Request) -> HTMLResponse:
     """Render Swagger UI over the application's OpenAPI document, with the
     operation filter enabled. The document URL keeps the request's
-    `root_path`, as FastAPI's own page does."""
+    `root_path`, as FastAPI's own page does. The response forbids framing,
+    so that a page on another host of the same site cannot display it with
+    the user's session cookie."""
     root_path = request.scope.get("root_path", "").rstrip("/")
-    return get_swagger_ui_html(
+    response = get_swagger_ui_html(
         openapi_url=root_path + request.app.openapi_url,
         title=f"{request.app.title} - Swagger UI",
         swagger_js_url=f"{SWAGGER_UI_DIST}swagger-ui-bundle.js",
@@ -38,3 +40,6 @@ async def swagger_ui_html(request: Request) -> HTMLResponse:
         swagger_favicon_url=f"{SWAGGER_UI_DIST}favicon-32x32.png",
         swagger_ui_parameters={"filter": True},
     )
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    return response

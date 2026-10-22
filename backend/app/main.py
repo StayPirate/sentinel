@@ -86,6 +86,10 @@ app = SentinelAPI(
     version=get_version("sentinel"),
     debug=settings.debug,
     lifespan=lifespan,
+    # Every path the API serves starts with `/api/`, except the probes, so a
+    # host that also serves the web UI routes only `/api` to the API
+    # (docs/api-spec.md, Base URL).
+    openapi_url="/api/openapi.json",
     # FastAPI's own pages load the latest viewer release from a CDN; the
     # pinned Swagger UI page is registered below
     # (`app/api/interactive_docs.py`), and no other viewer is served.
@@ -270,7 +274,7 @@ async def _http_exception_handler(
 
 
 app.include_router(health.router)
-app.add_route("/docs", interactive_docs.swagger_ui_html, include_in_schema=False)
+app.add_route("/api/docs", interactive_docs.swagger_ui_html, include_in_schema=False)
 
 # Every `/api/v1` route drains the Ticket convergence effects registered in
 # its request transaction after `get_db()` commits
