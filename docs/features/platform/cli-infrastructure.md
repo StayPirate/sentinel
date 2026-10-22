@@ -42,6 +42,7 @@ explicit per-command opt-in.
 | `docs/features/identity/user-management.md` | Consumer: `manage-user` command group delegates to async services via the pattern defined here. |
 | `docs/features/identity/api-key-management.md` | Consumer: owns the `api-key` command group behavior and delegates to async services via the pattern defined here. |
 | `docs/features/platform/fetcher-operations.md` | Consumer: `fetcher` command group uses the `asyncio.run()` session mechanism defined here for its read-only queries. |
+| `docs/features/platform/example-dataset.md` | Consumer: `example-data` command group. |
 | `docs/features/identity/user-service.md`, `docs/features/identity/api-key-service.md` | Define the async service contracts invoked from within the `asyncio.run()` mechanism defined here. |
 | `docs/features/platform/system-settings.md` | Defines the system settings mechanism consumed by the Configuration Guard decorator. |
 | `docs/cli-reference.md` | Catalog: quick-reference index of all CLI commands with synopses, cross-referencing owning feature specs for full details. |
@@ -53,12 +54,12 @@ explicit per-command opt-in.
 | Console script | `sentinel`, registered via `[project.scripts]` in `backend/pyproject.toml` (`sentinel = "app.cli:main"`) |
 | Module invocation | `python -m app.cli ...`, backed by `backend/app/cli/__main__.py` delegating to the same `main()` entry point |
 | Code location | `backend/app/cli/` (subpackage under `backend/app/`) |
-| Group assembly | `backend/app/cli/__init__.py` defines a root Click group (`cli`) and registers each command group (`manage-user`, `fetcher`, `api-key`, and any future group) via `cli.add_command(...)`; the exported `main()` wrapper installs the signal handlers, performs the argument-encoding check, invokes `cli.main(standalone_mode=False)`, and maps exceptions to exit codes; each command performs the fail-fast bootstrap (Root Command Group & Bootstrap) |
+| Group assembly | `backend/app/cli/__init__.py` defines a root Click group (`cli`) and registers each command group (`manage-user`, `fetcher`, `api-key`, `example-data`, and any future group) via `cli.add_command(...)`; the exported `main()` wrapper installs the signal handlers, performs the argument-encoding check, invokes `cli.main(standalone_mode=False)`, and maps exceptions to exit codes; each command performs the fail-fast bootstrap (Root Command Group & Bootstrap) |
 
-Each command group (`manage-user`, `fetcher`, `api-key`) is implemented as
-its own Click `Group` in a dedicated module under `backend/app/cli/`
-(e.g., `backend/app/cli/manage_user.py`), imported and registered by the
-root group at import time. This mirrors the fetcher registry's
+Each command group (`manage-user`, `fetcher`, `api-key`, `example-data`) is
+implemented as its own Click `Group` in a dedicated module under
+`backend/app/cli/` (e.g., `backend/app/cli/manage_user.py`), imported and
+registered by the root group at import time. This mirrors the fetcher registry's
 import-time discovery pattern (`fetcher-infrastructure.md`, Registry)
 without requiring dynamic discovery — the CLI's command surface is small
 and enumerated explicitly. Those modules define only lightweight Click
@@ -277,6 +278,10 @@ per-command path selection.
   but never commit, commits exactly once after the complete database workflow
   succeeds, and rolls back on any exception or interruption before commit.
   This permits a command to compose multiple service operations atomically.
+  The one exception is `example-data load`, whose service commits one
+  transaction per dataset operation and whose failure leaves the operations
+  committed before it in place
+  (`docs/features/platform/example-dataset.md`, Steps and Transactions).
   Read-only workflows and workflows such as `manage-user unlock` that read
   PostgreSQL but mutate only ephemeral Redis state issue no empty database
   commit; session closure ends any read transaction without persisting state.
@@ -384,7 +389,10 @@ current catalog holds a lock or performs a multi-step operation where
 partial interruption would leave inconsistent state beyond what a single
 transaction rollback already resolves (read-only commands perform no
 writes; mutating async workflows own one transaction and delegate the
-individual mutations to services).
+individual mutations to services). The exception is `example-data load`:
+an interruption rolls back only its current operation and leaves a partial
+dataset, which its owning specification resolves by recreating the database
+(`docs/features/platform/example-dataset.md`, Steps and Transactions).
 
 **Q6 (exceptions)**: `KeyboardInterrupt` and the SIGTERM-derived exit are
 both terminal — they do not propagate beyond the root group.

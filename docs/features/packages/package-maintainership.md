@@ -52,6 +52,11 @@ associations. There is no unresolved-email table, maintainership history,
 identity-provisioning hook, periodic fetcher, freshness marker, cleanup, or
 revocation synchronization.
 
+The example dataset loader is the only other source of associations: in a
+newly created database, it passes fictional maintainer emails to
+`add_package_records()` without SMELT
+(`docs/features/platform/example-dataset.md`).
+
 ## Data Model
 
 ### TicketPackageMaintainer
@@ -382,7 +387,8 @@ contracts remain owned by `docs/features/packages/maintainer.md`.
 
 ## Recovery and Accepted Limitations
 
-Package resolution is the only acquisition trigger. There is no guaranteed
+Package resolution is the only acquisition trigger outside the example
+dataset load (Add-only acquisition). There is no guaranteed
 acquisition until a later trigger after:
 
 - a transient or malformed maintainership response;

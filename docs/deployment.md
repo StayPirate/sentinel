@@ -251,6 +251,71 @@ cd backend && uv run python -m app.cli manage-user create \
   --role admin
 ```
 
+To work with a complete fictional dataset instead, load the example dataset
+into a new database (below).
+
+#### Loading the Example Dataset
+
+The example dataset is a fictional dataset for local development and
+end-to-end tests: users for every role, Tickets in every status, CVEs,
+Products, packages, IBS requests, and entries in every audit trail
+(`docs/features/platform/example-dataset.md`). It is loaded only into a newly
+created database, never into a staging or production database. Every dataset
+user has the documented password `example-dataset-password`, so a dataset
+backend must be reachable only from the developer's host or from inside its
+test environment: publish its API port on the loopback interface only.
+
+The load requires PostgreSQL and valid application settings
+(`docs/configuration.md`); it uses no Redis, Celery broker, or network
+access, and disables every fetcher. Run it after the migrations and before
+starting any other Sentinel process:
+
+1. Create a new, empty database.
+2. Migrate it: `alembic upgrade head`.
+3. Load the dataset: `sentinel example-data load`.
+4. Start the API server and, optionally, the Celery worker and Beat. The IBS
+   RabbitMQ consumer is not needed; if it runs, set
+   `IBS_RABBITMQ_ENABLED=false`.
+
+From the published image, with the configuration of the target database in
+`.env`. Inside a container, `localhost` is the container itself, so
+`DATABASE_URL`, `REDIS_URL`, and `CELERY_BROKER_URL` name hosts that the
+container reaches, for example PostgreSQL and Redis containers on the same
+container network:
+
+```bash
+docker run --rm --env-file .env ghcr.io/vulnwatch/sentinel:<version> \
+  alembic upgrade head
+docker run --rm --env-file .env ghcr.io/vulnwatch/sentinel:<version> \
+  sentinel example-data load
+docker run -d --env-file .env -p 127.0.0.1:8000:8000 \
+  ghcr.io/vulnwatch/sentinel:<version>
+```
+
+Add the network option of your setup (for example `--network <name>`) to each
+command. Host networking (`--network host`) ignores `-p`, and the image's
+default command binds the API to every interface; with host networking, end
+the API command with `uvicorn app.main:app --host 127.0.0.1 --port 8000`
+instead. A dataset backend is recreated, not upgraded: to move to another
+Sentinel version, load that version's dataset into a new database. Migrating
+an existing dataset database instead would create, enabled, every fetcher
+that the new version adds.
+
+From a local checkout, with a new database in the development PostgreSQL of
+`scripts/dev-env.sh` (its container name is shown by `./scripts/dev-env.sh ps`):
+
+```bash
+docker exec <postgres-container> createdb -U sentinel sentinel_example
+cd backend
+export DATABASE_URL=postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel_example
+uv run alembic upgrade head
+uv run python -m app.cli example-data load
+```
+
+Start the local processes with the same `DATABASE_URL`. To reload the
+dataset, drop the database and repeat these steps: the load refuses a
+database that holds data, including a partially loaded dataset.
+
 ### Staging Deployment
 
 #### Configuration Checklist
@@ -300,6 +365,9 @@ cd backend && uv run python -m app.cli manage-user create \
   [Kubernetes Workloads](#kubernetes-workloads)). No workflow in this
   repository deploys an environment
 - IBS/RabbitMQ integration is active — staging receives real events
+- The example dataset is never loaded into staging: no user of
+  `docs/features/platform/example-dataset.md` (Users) exists, because every
+  dataset user has a public password
 - Run the IBS RabbitMQ consumer as its own singleton process. It requires
   PostgreSQL, uses Redis only for best-effort status heartbeat publication,
   and has no Celery app or broker dependency
@@ -389,6 +457,9 @@ Before the first production deployment:
       an origin other than the Sentinel host (`docs/configuration.md`,
       Application)
 - [ ] Log aggregation configured (see Log Aggregation, below)
+- [ ] The example dataset is not loaded: no user of
+      `docs/features/platform/example-dataset.md` (Users) exists, because
+      every dataset user has a public password
 - [ ] Backup strategy for PostgreSQL defined
 
 #### Production-Specific Notes
@@ -1402,6 +1473,8 @@ module `backend/app/ibs_consumer.py`); it is neither a Celery process nor a
 **One-shot jobs:**
 
 - Alembic migration job — see [Database Migrations](#database-migrations)
+- Example dataset load, in local development and test environments only — see
+  [Loading the Example Dataset](#loading-the-example-dataset)
 
 ### Singleton Processes
 
@@ -1532,6 +1605,11 @@ This property is guaranteed by the following mechanisms:
 - **Other runtime roles** apply their own feature-defined infrastructure
   dependency and degradation contracts. No process silently waits for another
   application process.
+
+A backend loaded with the example dataset adds one prerequisite: the load runs
+after the migrations and before any runtime process starts (see
+[Loading the Example Dataset](#loading-the-example-dataset)). It is a one-shot
+job of local development and test environments, not a runtime process.
 
 If a future change introduces an inter-process startup dependency, this
 section MUST be updated with the new constraint and the deployment

@@ -181,6 +181,8 @@ async def update_default_cvss_version(
 `session` is the caller-owned asynchronous database session. `new_version` is
 the requested value; `acting_user_id` is the authenticated administrator who
 requested the change and always attributes the resulting audit event. The
+example dataset load passes its dataset administrator in that role
+(`docs/features/platform/example-dataset.md`, Attribution). The
 function returns the persisted setting value after the call: the new value when
 it changed the row, or the locked-current value when the request was a no-op.
 

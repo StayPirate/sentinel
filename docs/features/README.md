@@ -62,6 +62,7 @@ Index of all feature specification domains.
 - [logging.md](platform/logging.md) — Operational/diagnostic logging model, correlation IDs
 - [cve-record-parser.md](platform/cve-record-parser.md) — Shared CVE Record Format 5.x parser for CVE fetchers
 - [cve-source-failure-retry.md](platform/cve-source-failure-retry.md) — Scheduled retry of per-source CVE fetch failures (`evaluate_failed_cve_sources`)
+- [example-dataset.md](platform/example-dataset.md) — Fictional example dataset and its `example-data load` command for development and tests
 - [testing-strategy.md](platform/testing-strategy.md) — Testing methodology, infrastructure, fixtures, and coverage policy
 
 ### Tickets

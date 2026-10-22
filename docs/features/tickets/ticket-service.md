@@ -91,7 +91,9 @@ owning contract supports both direct and system callers:
 **API handler rule**: API endpoint handlers MUST always pass the UUID of
 the authenticated user as `acting_user_id`. Passing `None` from an API
 handler is a bug — it would silently bypass auto-assignment. `None` is
-reserved exclusively for system entry points.
+reserved exclusively for system entry points. The example dataset load passes
+the dataset user that stands for the authenticated caller
+(`docs/features/platform/example-dataset.md`, Attribution).
 
 **Exception**: `grant_access` and `revoke_access` accept
 `acting_user_id: UUID` (non-optional) because these operations are

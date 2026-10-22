@@ -18,6 +18,7 @@ health-endpoints.md             Liveness (/health) and readiness (/ready) probes
 logging.md                       Operational/diagnostic logging model, correlation IDs
 cve-record-parser.md            Shared CVE Record Format 5.x parser for CVE fetchers
 cve-source-failure-retry.md     Retry policy for per-source CVE fetch failures
+example-dataset.md              Fictional dataset and its loader for development and tests
 testing-strategy.md             Testing methodology, fixtures, coverage policy
 ```
 
@@ -50,6 +51,10 @@ testing-strategy.md             Testing methodology, fixtures, coverage policy
 - `testing-strategy.md` defines the testing methodology, database setup,
   and coverage policy. Its audit trail testing section references
   `audit-trail-infrastructure.md` for the Audit Trail Index.
+- `example-dataset.md` defines the `example-data load` command, built on
+  `cli-infrastructure.md`, and its fictional dataset. The dataset is loaded
+  through the service operations of the identity, ticket, and package domains,
+  and `testing-strategy.md` defines the tests that keep it aligned with them.
 - `logging.md` defines the operational logging model (structured logs,
   correlation IDs) consumed implicitly by every other spec that
   prescribes log statements; it is distinct from

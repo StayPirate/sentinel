@@ -4649,7 +4649,10 @@ CLI commands MUST be tested against the Output Contract in
   `asyncio.run()` call
 - A successful PostgreSQL mutation commits exactly once; a service or later
   workflow failure rolls back and commits zero times. Read-only and Redis-only
-  workflows issue no empty commit
+  workflows issue no empty commit. `example-data load`, which commits one
+  transaction per dataset operation, is verified instead by the Example Dataset
+  scenarios below, for this rule and for the interruption test of the next
+  rule
 - `SIGINT` and `SIGTERM` subprocess tests wait for an observable readiness
   point proving that the CLI signal handlers are installed, then assert exit
   codes 130 and 143. A focused transaction test injects interruption after
@@ -4689,6 +4692,57 @@ a separate required artifact assertion. Detailed subcommand discovery,
 options, output, interactive behavior, domain errors, and mutation workflows
 remain in focused CLI tests; adding a command does not automatically require
 another image test.
+
+### Example Dataset
+
+The example dataset (`docs/features/platform/example-dataset.md`) is verified
+against a dedicated database that the test creates on the test PostgreSQL
+server, migrates to the head revision with Alembic, and drops afterwards. The
+load commits, so it never runs in a worker database shared with other tests,
+and the dedicated database starts its Ticket identifiers at `SNTL-1`.
+
+- **Load**: one complete load through `load_example_dataset()` succeeds, and
+  the resulting state equals every table of Dataset Content: the users with
+  their roles, activity, and password; the identity events with their actors
+  (`user_id` NULL for the events of the first administrator's creation, the
+  administrator for the others); the setting value and both setting events;
+  every fetcher disabled with its `disabled` event; the Products with their
+  lifecycle phases and thresholds; the CVEs with their source data; the
+  Tickets with their identifiers, status, assignee, confidentiality, access
+  grant, coordinated release date, severity, and priority override; the
+  packages, tracks, Products, eligibility, release, and maintainers; the IBS
+  requests, actions, correlations, and delivery statuses; the references; the
+  maintainer workbench of `dbrown`; at least one `confidentiality_changed`
+  event; and at least one event in every audit trail of the Audit Trail Index.
+- **Isolation**: during the load, no Celery task is published, no Redis
+  command is issued, no outbound HTTP request is made, and no transaction
+  commits with a registered post-commit effect.
+- **Guard**: a database that holds a user, a Ticket, a CVE, or a Product is
+  refused with `ExampleDatasetNotEmptyError` and the command's exit code 1 and
+  message, with no write.
+- **Failure**: an injected failure of an operation in a step reports `✓` for
+  the earlier steps, `✗` for that step, and `—` for every later step, prints
+  the partial-dataset warning when an earlier operation was committed and no
+  warning when the first operation fails, exits with code 1 for a service
+  exception and 2 for another exception, and leaves the operations committed
+  before the failure in place. An interruption after an operation's flush and
+  before its commit rolls back that operation only.
+- **Registered effect**: an operation that registers a post-commit effect
+  rolls back and fails its step.
+- **Coverage**: after one complete load, every table of the SQLAlchemy
+  metadata holds at least one row, except the tables of the test's exception
+  list (`api_key`, `fetcher_run`, `session`, and `track_release_checkpoint`).
+  Every member of `Role`, `TicketStatus`, `PackageStatus`, `DeliveryStatus`,
+  `WorkflowType`, `Severity`, and `LifecyclePhase` occurs in the dataset, as
+  do a user without roles, an unresolved Ticket severity, and an unavailable
+  lifecycle phase, except the members of the test's per-enumeration exception
+  lists, which are empty. Each exception list is checked in both directions:
+  a covered item that an exception list names fails the test, as does an
+  exception that names no current table or member. The tables and members
+  come from the code, so a new table or member fails the test until the
+  dataset covers it or the exception list names it with its reason.
+
+The command itself is verified by the CLI Commands scenarios above.
 
 ---
 

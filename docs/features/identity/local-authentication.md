@@ -486,6 +486,11 @@ session behavior.
 - **No password complexity rules**: research shows that length is more
   effective than complexity requirements. The 16-character minimum
   provides adequate entropy.
+- **Example dataset users**: the example dataset creates local users, an
+  administrator included, who share one published password, for local
+  development and test environments only. Its load refuses a database that
+  holds data; the accepted risk and its controls are in
+  `docs/features/platform/example-dataset.md` (Security Considerations).
 - **Session invalidation on password change**: prevents continued access
   through sessions authenticated with old credentials after a password reset.
   A login that verified the old password before the reset but has not yet

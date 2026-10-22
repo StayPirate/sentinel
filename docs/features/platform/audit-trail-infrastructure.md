@@ -325,6 +325,11 @@ caller's transaction governs durability.
 - `user_id` is also `NULL` when no authenticated Sentinel user is attributable
   to the operation (e.g., CLI, background task, external sync, automated
   detection)
+- The example dataset load is the one exception: although it runs as a CLI
+  process, it records as `user_id` the dataset user that stands for the
+  authenticated caller of each user-attributed operation
+  (`docs/features/platform/example-dataset.md`, Attribution). It runs only in
+  a newly created development or test database
 - Subclasses that only record human-initiated actions (e.g.,
   `SettingAuditLog`, `FetcherAuditLog`) MUST override `log_event()` to
   validate that `user_id` is provided, raising `ValueError` if it is

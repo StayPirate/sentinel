@@ -654,7 +654,10 @@ request state, correlation provenance, delivery authority, or idempotency state.
 
 The same track-scoped operation is used by the daily fetcher, package-add
 acceleration, Ticket-convergence catch-up, and RabbitMQ request-number
-wake-ups. No caller has a reduced correlation or delivery algorithm.
+wake-ups. No caller has a reduced correlation or delivery algorithm. The
+example dataset loader is the one caller without IBS: it supplies a complete
+fictional observation and applies it through the same locked steps
+([Trusted Observation Application](#trusted-observation-application)).
 
 ### Scope Identity
 
@@ -753,6 +756,69 @@ condition, not by replacing the winner. The stale-negative guard of step 8
 prevents a stale negative result from overwriting positive event or polling
 work committed after the scan began. Audit history is never queried
 for current state, idempotency, or provenance.
+
+### Trusted Observation Application
+
+`apply_ibs_request_observation()` applies one complete observation that its
+caller supplies, without IBS, to one IBS track. Its only caller is the example
+dataset loader, which applies fictional request evidence
+(`docs/features/platform/example-dataset.md`); a structural test verifies that
+no other application module references the function (Testing Requirements).
+It is a Category A composable service function of the reconciliation module:
+
+```python
+async def apply_ibs_request_observation(
+    db: AsyncSession,
+    *,
+    track_id: UUID,
+    observation: Observation,
+) -> ObservationApplication:
+```
+
+`observation` has the form that [Algorithm](#algorithm) step 3 produces: the
+derived delivery value and the request and action evidence in its stored form.
+The caller asserts that the observation is complete and that its delivery value
+is the one that [Delivery Derivation](#delivery-derivation) yields for its
+evidence; the function cannot verify upstream completeness or the release
+proof. The result is exactly `created`, `updated`, or `no_op`; its concrete
+type is an implementation choice.
+
+**Guards**: before any write, the function reads the scope of `track_id`
+([Scope Identity](#scope-identity)) and raises `ValueError` when the track does
+not exist, its workflow is not `ibs`, or its Ticket is not active. It also
+raises `ValueError` when an action of the observation does not represent the
+scope's logical package and codestream
+([Package and Codestream Identity](#package-and-codestream-identity)), does
+not satisfy the structural requirements of
+[IBSRequestAction](#ibsrequestaction), has a semantic identity that differs
+from the identity of its own fields, or belongs to a request number for which
+the observation has no request.
+
+**Behavior**: in the caller's transaction, the function reads the scope's
+step-1 snapshot of [Algorithm](#algorithm), with no I/O before the lock, and
+then performs Algorithm steps 4 to 9 for the scope with the supplied
+observation: Ticket lock, locked revalidation, conditional request and action
+upserts, correlation of every action to the track, delivery derivation under
+the stale-negative guard, and delivery application through
+`package_service.set_track_delivery_status()`. It flushes and returns
+`created`, `updated`, or `no_op`. It never commits or rolls back, performs no
+IBS, Redis, AMQP, or Celery I/O, and registers no post-commit effect.
+
+**Audit events**: none, as for every request evidence and delivery outcome
+([Delivery Derivation](#delivery-derivation)).
+
+**Re-invocation**: idempotent; the same observation applied again returns
+`no_op`.
+
+**Exceptions**: `ValueError` for the guards above; `TicketNotMutableError` for
+a Ticket that became `Ignored` or `Duplicated` before the lock;
+`IBSObservationRejectedError` when locked revalidation finds a stale scope or
+step 6 or 7 rejects the observation; `InvalidDeliveryStatusTransition`; and
+database and flush exceptions. The caller rolls back on every exception.
+
+| Exception | Raised when | Handling |
+|---|---|---|
+| `IBSObservationRejectedError` | Locked revalidation or a conditional upsert rejects the supplied observation | Inherits directly from `ServiceError`. It carries one bounded category of [Structured Logs](#structured-logs) — `scope_changed`, `stale_request_observation`, `conflicting_observation`, or `conflicting_provenance` — and its message names only that category. No API handler receives it; the example dataset load fails its step |
 
 ### Structured Logs
 
@@ -1327,6 +1393,11 @@ Implementation coverage must include:
   event;
 - first run, long gap, re-enable, package-add and Ticket-convergence catch-up,
   duplicate/out-of-order event acceleration, and fetcher metric precedence;
+- trusted observation application: every guard, the `created`, `updated`, and
+  `no_op` outcomes, a `RELEASED` observation applied from `PENDING`, each
+  rejection category, no IBS, Redis, or Celery I/O and no Ticket event, and a
+  structural test that `app/services/example_dataset.py` is the only module
+  outside the reconciliation module that references the function;
 - created, updated, complete-positive no-op, complete no-match,
   stale/inapplicable, incomplete, failed, mixed, all-failed, and empty-run
   outcomes with exact succeeded, failed, created, and updated counters;

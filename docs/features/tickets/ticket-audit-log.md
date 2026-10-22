@@ -92,6 +92,11 @@ event type.
 - `delivery_status` changes create no `TicketAuditEvent`. Request/action
   provenance and the persisted track value are their domain evidence; no
   `delivery_status_changed` event exists.
+- A database loaded with the example dataset holds the same events with
+  fictional data: `package_maintainer_added` from fictional maintainer emails
+  instead of package resolution, and `product_released` from a fictional
+  advisory instead of `updateinfo.xml`
+  (`docs/features/platform/example-dataset.md`, Attribution).
 - `old_value` and `new_value` store human-readable strings. For enum values,
   store the enum name (e.g., `AFFECTED`, `NOT_AFFECTED`). For user
   references, store the username.

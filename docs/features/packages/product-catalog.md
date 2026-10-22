@@ -790,6 +790,39 @@ integration would require no changes.
 
 ---
 
+## Catalog Publication Boundaries
+
+The database publication of each catalog synchronization is a reusable
+boundary. It receives input that its caller has already validated and
+performs only the database steps of its synchronization. Its callers are the
+synchronization fetcher, after its external I/O and validation, and the
+example dataset loader, which publishes a fictional catalog before any Ticket
+exists (`docs/features/platform/example-dataset.md`).
+
+| Boundary | Input | Behavior | Result |
+|---|---|---|---|
+| Product publication | The Products of one complete validated snapshot (CPE, name, version, display name, repositories) and the snapshot time | Product Sync steps 4 to 7 | The snapshot time applied, whether at least one Product is newly current, and the work-unit counts |
+| Lifecycle publication | The four-column lifecycle projection of Product Lifecycle Sync steps 4 to 7, by CPE | Product Lifecycle Sync steps 3 and 8 | The matched Products and the number updated |
+| Threshold publication | The resolved thresholds of CVSS Threshold Sync step 3, by CPE | CVSS Threshold Sync steps 4 to 8 | The evaluated and the changed Product IDs |
+
+Every boundary receives a session with no open transaction and no pending
+work, begins its publication transaction, and commits it once, also when
+nothing changes. It owns that transaction as a publication orchestration
+boundary: this is an explicit exception to `docs/conventions.md`
+(Caller-Owned Service Transactions), under which a function that receives a
+caller's session never commits. A database error propagates before the commit
+succeeds; the caller rolls the session back, and no partial publication
+persists. The boundaries create no audit event, perform no network I/O, and
+dispatch no task. The post-commit steps — Product Sync step 8 (Product catalog backfill)
+and CVSS Threshold Sync steps 9 and 10 (the mismatch scan and the eligibility
+recalculation dispatch) — belong to the fetchers, not to the boundaries.
+
+Re-invocation with the same input writes no lifecycle or threshold change. A
+repeated Product publication re-observes the same Products under a new
+snapshot time and reports no newly current Product.
+
+---
+
 ## API Endpoints
 
 ### List Products
