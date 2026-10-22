@@ -6,7 +6,8 @@ workflow pins to be tracked by Renovate, and lists the forms that the
 `Shell Lint` job, the `uvx` tools, and the Swagger UI assets in those forms
 with exact versions: a pin that leaves its form is silently dropped from
 dependency extraction rather than rejected. See issue #1060. The Swagger UI
-of the API's `/docs` page shares the GitHub Pages site's pin (issue #1070).
+of the API's `/docs` page shares the GitHub Pages site's pin, and the site
+enables the operation filter (issue #1070).
 
 The workflows are parsed as YAML (`tests/support/yaml_files.py`); only the
 Renovate hint comments, which are not YAML data, the `Makefile`, and the
