@@ -50,6 +50,13 @@ through a reference that resolves to the latest release, and that release
 changes only through a reviewed dependency update (`docs/deployment.md`,
 Workflow Conventions).
 
+For the same reason the page forbids being displayed in a frame: a page on
+another host of the same site could otherwise frame it, with the user's
+session cookie, and lead the user into sending requests through it. Its
+response carries `X-Frame-Options: DENY` and `Content-Security-Policy:
+frame-ancestors 'none'`; the policy has no other directive, so it does not
+restrict what the page loads.
+
 ## Authentication and Authorization
 
 ### Authentication

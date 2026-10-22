@@ -43,6 +43,15 @@ class TestInteractiveDocumentation:
         assert "url: '/api/openapi.json'" in response.text
         assert '"filter": true' in response.text
 
+    async def test_docs_page_forbids_framing(self, client: AsyncClient) -> None:
+        """A page on another host of the same site cannot display the page,
+        with the user's session cookie, in a frame."""
+        response = await client.get("/api/docs")
+
+        assert response.status_code == 200
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
+
     async def test_openapi_document_is_served(self, client: AsyncClient) -> None:
         response = await client.get("/api/openapi.json")
 

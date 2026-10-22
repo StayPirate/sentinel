@@ -50,7 +50,8 @@ body:
       label: Sentinel version
       description: >-
         The version of Sentinel where the bug occurs (e.g., 0.3.0).
-        Check via `sentinel --version` or the `/api/v1/health` endpoint.
+        Check via `sentinel --version` or the `info.version` field of
+        `/api/openapi.json`.
       placeholder: "0.3.0"
     validations:
       required: true
