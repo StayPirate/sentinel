@@ -29,10 +29,11 @@ on:
   # build-images.yml pushes its image, and that run publishes the GitHub
   # Release as its last step. The `release: published` event cannot be
   # used instead, because the release is published with the GITHUB_TOKEN,
-  # whose events start no workflow runs. The branch filter only avoids a
-  # skipped run for every master build (whose head branch is `master`; a
-  # version-tag run's is the tag name); the job condition below is the
-  # actual gate.
+  # whose events start no workflow runs. The branch filter drops every
+  # master build (head branch `master`; a version-tag run's head branch is
+  # the tag name) before it joins the concurrency group, so a master build
+  # neither adds a skipped run nor replaces a pending release scan; the
+  # job condition below is the actual gate.
   workflow_run:
     workflows: ["Build Docker Images"]
     branches-ignore: [master]
