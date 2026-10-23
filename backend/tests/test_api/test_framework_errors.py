@@ -102,7 +102,7 @@ class TestRouteNotFound:
         self, client: AsyncClient
     ) -> None:
         """The path is not redirected to the endpoint path: a redirect built
-        from the request would point a client behind a TLS-terminating proxy
+        from the request could point a client behind a TLS-terminating proxy
         at `http://`. Each registered path is requested with every method it
         serves, so a new endpoint is covered without changing this test. A
         response to `HEAD` has no body."""

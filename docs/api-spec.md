@@ -817,7 +817,8 @@ Protection, which precedes routing, rejects it first:
   `/api/v1/tickets/`, receives `404 ROUTE_NOT_FOUND` and is not redirected. No
   routing response is a redirect, so none depends on the scheme or the `Host`
   header with which the request reaches the API; behind a reverse proxy that
-  terminates TLS, that scheme is `http` (`docs/deployment.md`, Sentinel Host).
+  terminates TLS, that scheme can be `http` (`docs/deployment.md`, Sentinel
+  Host).
 - Routing precedes JSON body decoding, every shared request-input constraint,
   authentication, and authorization, so neither response depends on the body
   or the credentials sent.

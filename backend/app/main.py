@@ -96,8 +96,9 @@ app = SentinelAPI(
     docs_url=None,
     redoc_url=None,
     # A path with a trailing slash added or removed is not redirected: the
-    # redirect's URL would take the scheme of the request, `http` behind a
-    # proxy that terminates TLS (docs/api-spec.md, Routing Responses).
+    # redirect's URL would take the scheme of the request, which can be
+    # `http` behind a proxy that terminates TLS (docs/api-spec.md, Routing
+    # Responses).
     redirect_slashes=False,
     # Applies the shared query-parameter length limit
     # (docs/api-spec.md, Query Parameter Length Limit) and the
