@@ -95,6 +95,11 @@ app = SentinelAPI(
     # (`app/api/interactive_docs.py`), and no other viewer is served.
     docs_url=None,
     redoc_url=None,
+    # A path with a trailing slash added or removed is not redirected: the
+    # redirect's URL would take the scheme of the request, which can be
+    # `http` behind a proxy that terminates TLS (docs/api-spec.md, Routing
+    # Responses).
+    redirect_slashes=False,
     # Applies the shared query-parameter length limit
     # (docs/api-spec.md, Query Parameter Length Limit) and the
     # inadmissible-character rejection (docs/api-spec.md, Inadmissible
@@ -210,9 +215,9 @@ def _allowed_methods(request: Request) -> list[str]:
 
     Starlette's own header names only the methods of the first route whose
     path matches, so a path served by several routes (`GET` and `POST
-    /api/v1/tickets`) would advertise one. Instead, the router is asked,
-    as Starlette does for its trailing-slash redirect, whether a copy of
-    the request scope with each standard method fully matches a route.
+    /api/v1/tickets`) would advertise one. Instead, the router is asked
+    whether a copy of the request scope with each standard method fully
+    matches a route.
     """
     routes = request.app.router.routes
     allowed: list[str] = []
@@ -234,8 +239,9 @@ async def _http_exception_handler(
     Sentinel code raises `AppError`, never `HTTPException`, so these come
     only from routing and from reading the request body:
 
-    - 404: no endpoint path matches the request path → `404
-      ROUTE_NOT_FOUND` (Routing Responses).
+    - 404: no endpoint path matches the request path, also when it would
+      match with a trailing slash added or removed → `404 ROUTE_NOT_FOUND`
+      (Routing Responses).
     - 405: endpoint paths match, but none for the method → `405
       ROUTE_METHOD_NOT_ALLOWED`, with an `Allow` header naming every
       method that has an endpoint for the path (`_allowed_methods`).

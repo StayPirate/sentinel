@@ -2229,7 +2229,9 @@ through the registered application MUST prove:
   returns `405 ROUTE_METHOD_NOT_ALLOWED` with an `Allow` header naming exactly
   the methods served there. The test derives the paths and methods from the
   registered routes, so a new endpoint is covered without a new test;
-- the trailing-slash `307` redirect;
+- for every registered endpoint path with a trailing slash added, and every
+  method served there, `404 ROUTE_NOT_FOUND` without a `Location` header. The
+  test derives the paths and methods from the registered routes;
 - `422 VALIDATION_ERROR` with one `json_invalid` entry, with no
   authentication side effect, for a body that is syntactically malformed,
   that cannot be decoded as text, that contains an integer beyond the default
