@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.11.0](https://github.com/vulnwatch/sentinel/compare/v0.10.3...v0.11.0) (2026-10-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** move the OpenAPI document and docs page under /api ([#1076](https://github.com/vulnwatch/sentinel/issues/1076))
+
+### Features
+
+* add the example-data load command for a fictional dataset ([#1080](https://github.com/vulnwatch/sentinel/issues/1080)) ([af3e98b](https://github.com/vulnwatch/sentinel/commit/af3e98b22bb516547d1abc128d191beb09b769fa)), closes [#1074](https://github.com/vulnwatch/sentinel/issues/1074)
+* **api:** move the OpenAPI document and docs page under /api ([#1076](https://github.com/vulnwatch/sentinel/issues/1076)) ([2c283a9](https://github.com/vulnwatch/sentinel/commit/2c283a99e885b58578b82787836c40093a96d94e)), closes [#1073](https://github.com/vulnwatch/sentinel/issues/1073)
+
+
+### Bug Fixes
+
+* **api:** serve a pinned Swagger UI as the only interactive API docs ([#1071](https://github.com/vulnwatch/sentinel/issues/1071)) ([c86fb72](https://github.com/vulnwatch/sentinel/commit/c86fb7247422a8e5cae84e00889dbc12d2489d71)), closes [#1070](https://github.com/vulnwatch/sentinel/issues/1070)
+* use a numeric image user and document Kubernetes deployments ([#1056](https://github.com/vulnwatch/sentinel/issues/1056)) ([4272cac](https://github.com/vulnwatch/sentinel/commit/4272caca18b37a06bbe94541f152ffc3186695fd)), closes [#1055](https://github.com/vulnwatch/sentinel/issues/1055)
+
 ## [0.10.3](https://github.com/vulnwatch/sentinel/compare/v0.10.2...v0.10.3) (2026-10-20)
 
 
