@@ -1,8 +1,9 @@
 name: Image Vulnerability Scan
 
-# Weekly, non-blocking scan of the published backend image for OS-level
-# vulnerabilities. See docs/deployment.md (Image Vulnerability
-# Monitoring) for the full rationale: Python dependencies are covered by
+# Non-blocking scan of the published backend image for OS-level
+# vulnerabilities, run weekly and after every published release. See
+# docs/deployment.md (Image Vulnerability Monitoring) for the full
+# rationale: Python dependencies are covered by
 # GitHub Dependabot alerts, Renovate vulnerability-fix PRs, and the
 # pip-audit gate on dependency changes and Release PRs, but the Debian
 # base layer (python:3.14-slim) is otherwise unmonitored for known
@@ -24,6 +25,18 @@ on:
   schedule:
     # Every Monday at 06:00 UTC.
     - cron: "0 6 * * 1"
+  # After a release: `latest` moves only when a version-tag run of
+  # build-images.yml pushes its image, and that run publishes the GitHub
+  # Release as its last step. The `release: published` event cannot be
+  # used instead, because the release is published with the GITHUB_TOKEN,
+  # whose events start no workflow runs. The branch filter only avoids a
+  # skipped run for every master build (whose head branch is `master`; a
+  # version-tag run's is the tag name); the job condition below is the
+  # actual gate.
+  workflow_run:
+    workflows: ["Build Docker Images"]
+    branches-ignore: [master]
+    types: [completed]
   workflow_dispatch:
 
 concurrency:
@@ -36,11 +49,21 @@ permissions:
 
 env:
   SECURITY_LABEL: security
+  # The title identifies the open tracking issue across runs; renaming it
+  # would orphan an issue opened under the previous title.
   ISSUE_TITLE: "Weekly image scan: fixable HIGH/CRITICAL vulnerabilities detected"
 
 jobs:
   image-scan:
     name: Scan Published Image
+    # A workflow_run trigger scans only after a successful version-tag
+    # (`push`) run of build-images.yml, i.e. once its image is behind
+    # `latest` and its release is published. master builds never move
+    # `latest`, and a failed run may not have published anything.
+    if: >
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -126,9 +149,9 @@ jobs:
           set -euo pipefail
           body_file=$(mktemp)
           {
-            echo "Automated weekly scan of \`${{ steps.image.outputs.ref }}\` found fixable HIGH/CRITICAL OS-level vulnerabilities."
+            echo "Automated scan of \`${{ steps.image.outputs.ref }}\` found fixable HIGH/CRITICAL OS-level vulnerabilities."
             echo ""
-            echo "This scan is non-blocking by design (see \`docs/deployment.md\`, Image Vulnerability Monitoring). Renovate periodically proposes a PR bumping \`PYTHON_BASE_DIGEST\` in \`backend/Dockerfile\` to the current \`python:3.14-slim\` digest (see \`docs/deployment.md\`, Container Build Conventions → Base image pinning); merging the latest such PR is the expected remediation. If no pending Renovate PR resolves this finding, a maintainer can resolve the current digest manually and open one directly."
+            echo "This scan is non-blocking by design (see \`docs/deployment.md\`, Image Vulnerability Monitoring). Renovate periodically proposes a PR bumping \`PYTHON_BASE_DIGEST\` in \`backend/Dockerfile\` to the current \`python:3.14-slim\` digest (see \`docs/deployment.md\`, Container Build Conventions → Base image pinning); merging the latest such PR is the expected remediation. If no pending Renovate PR resolves this finding, a maintainer can resolve the current digest manually and open one directly. The merged fix reaches the scanned image with the next release, and the scan that runs after that release closes this issue."
             echo ""
             echo "<details><summary>Fixable HIGH/CRITICAL findings</summary>"
             echo ""
@@ -158,9 +181,9 @@ jobs:
       # (exit code 0 → `outcome: success`). If a tracking issue from an
       # earlier run is still open, the condition it tracked no longer
       # exists — close it so a remediated finding (typically a merged
-      # Renovate base-image digest bump) does not leave a stale issue
-      # behind. An infrastructure failure of the scan step is
-      # `outcome: failure`, so an error never closes the issue.
+      # Renovate base-image digest bump, shipped by a release) does not
+      # leave a stale issue behind. An infrastructure failure of the scan
+      # step is `outcome: failure`, so an error never closes the issue.
       - name: Close tracking issue when the scan is clean
         if: steps.trivy-fixable.outcome == 'success'
         env:
