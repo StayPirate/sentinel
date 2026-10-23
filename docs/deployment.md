@@ -1036,7 +1036,12 @@ repository level). This keeps the git history linear and gives
 release-please a clean, single commit to analyze per PR. With squash
 merge, the PR title becomes the commit message — ensure it follows the
 Conventional Commits format defined in `docs/conventions.md` (Git
-Conventions).
+Conventions). The merging maintainer replaces that subject only where
+this document requires a release signal that the PR title cannot carry:
+a remediating base-digest refresh (see Image Vulnerability Monitoring,
+Remediation path). The replacement follows the same format; CI validates
+only the PR title, so the maintainer checks the subject before
+confirming the merge.
 
 ### Changelog
 
