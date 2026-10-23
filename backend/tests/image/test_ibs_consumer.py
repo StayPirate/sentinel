@@ -18,13 +18,13 @@ Reconnection; Structured Logs; Status API).
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Callable
-from typing import Any
 
 import httpx
 import pytest
+
+from tests.image.conftest import json_log_records
 
 _SERVICE = "ibs-consumer"
 # The fictional user information of IBS_RABBITMQ_URL in docker-compose.smoke.yml.
@@ -34,26 +34,13 @@ _URL_CREDENTIALS = "example:example"
 _STATUS_TIMEOUT_SECONDS = 30.0
 
 
-def _json_records(logs: str) -> list[dict[str, Any]]:
-    """The structured log records of a log stream; other lines are ignored."""
-    records: list[dict[str, Any]] = []
-    for line in logs.splitlines():
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-    return records
-
-
 @pytest.mark.image
 def test_ibs_consumer_starts_and_stays_in_its_reconnect_loop(
     compose_logs: Callable[[str], str],
     compose_service_state: Callable[[str], str],
 ) -> None:
     logs = compose_logs(_SERVICE)
-    records = _json_records(logs)
+    records = json_log_records(logs)
     events = [record.get("event") for record in records]
 
     assert "ibs_consumer_started" in events, logs

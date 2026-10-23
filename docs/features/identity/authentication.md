@@ -858,8 +858,10 @@ decoding follows the same rule.
    limiter aggregates hundreds of requests into a single log message.
    The source IP is the ASGI peer address (`request.client.host`) — the
    application does not trust forwarded headers (`X-Forwarded-For`,
-   `Forwarded`). Per-real-client-IP rate limiting behind a reverse proxy
-   is delegated to the proxy layer (see
+   `Forwarded`). The API server's command turns off the forwarded-header
+   processing of the ASGI server, so the peer address is the address of the
+   connection (`docs/deployment.md`, Container Images). Per-real-client-IP
+   rate limiting behind a reverse proxy is delegated to the proxy layer (see
    `docs/features/identity/local-authentication.md`, Security
    Considerations). If `request.client` is `None` (e.g., connections
    over a Unix domain socket), the limiter uses the sentinel string

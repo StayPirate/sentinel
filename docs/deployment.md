@@ -190,8 +190,10 @@ git config --local core.hooksPath .githooks
 # Run database migrations
 cd backend && uv run alembic upgrade head
 
-# Start the backend API server
-cd backend && uv run uvicorn app.main:app --reload --port 8000
+# Start the backend API server. --no-proxy-headers as in the image's API
+# command (see "Container Images" below): the UI development server proxies
+# /api to it over loopback.
+cd backend && uv run uvicorn app.main:app --reload --port 8000 --no-proxy-headers
 
 # Start Celery worker (separate terminal)
 # --pool=prefork is explicit here for clarity — it is also Celery's own
@@ -295,9 +297,10 @@ docker run -d --env-file .env -p 127.0.0.1:8000:8000 \
 Add the network option of your setup (for example `--network <name>`) to each
 command. Host networking (`--network host`) ignores `-p`, and the image's
 default command binds the API to every interface; with host networking, end
-the API command with `uvicorn app.main:app --host 127.0.0.1 --port 8000`
-instead. A dataset backend is recreated, not upgraded: to move to another
-Sentinel version, load that version's dataset into a new database. Migrating
+the API command with `uvicorn app.main:app --host 127.0.0.1 --port 8000
+--no-proxy-headers` instead (see [Container Images](#container-images)). A
+dataset backend is recreated, not upgraded: to move to another Sentinel
+version, load that version's dataset into a new database. Migrating
 an existing dataset database instead would create, enabled, every fetcher
 that the new version adds.
 
@@ -1474,6 +1477,21 @@ enumeration of all process roles.
 | Git worker (Celery) | Git-based fetcher execution | No (single, volume affinity — see [Git Worker Volume](#git-worker-volume)) |
 | Celery Beat | Periodic task scheduling | No (singleton) |
 | IBS RabbitMQ consumer | Real-time event consumption | No (singleton — see `docs/features/integrations/ibs-rabbitmq-integration.md`) |
+
+The API server is started as `uvicorn app.main:app --host 0.0.0.0 --port 8000
+--no-proxy-headers`, the image's default command. `--no-proxy-headers` turns
+off uvicorn's processing of the `X-Forwarded-For` and `X-Forwarded-Proto`
+request headers, which is otherwise on: for a request from a trusted address
+(those listed in `FORWARDED_ALLOW_IPS`, by default the loopback addresses),
+uvicorn would replace the peer address and the scheme with values taken from
+those headers, which a client can set. The application uses the peer address
+as the source IP of the warning for an unknown API key and trusts no forwarded
+header (`docs/features/identity/authentication.md`, API key validation), so
+the peer address is the address of the connection: behind a reverse proxy, the
+proxy's. The command-line option takes precedence over uvicorn's environment
+variables, so neither `FORWARDED_ALLOW_IPS` nor `UVICORN_PROXY_HEADERS`
+changes this. A deployment that replaces the API command keeps
+`--no-proxy-headers`.
 
 The two Celery worker roles share the image and differ in their command; the
 Git worker also mounts the Git volume (see [Git Worker Volume](#git-worker-volume)).

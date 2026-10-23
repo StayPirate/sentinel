@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.image.conftest import ImageSmokeContext
+from tests.image.conftest import ImageSmokeContext, json_log_records
 
 PYPROJECT_PATH = Path(__file__).resolve().parents[2] / "pyproject.toml"
 
@@ -59,6 +60,30 @@ assert build_tls_context().verify_mode.name == "CERT_REQUIRED"
 print("RUNTIME-MANIFEST-OK")
 """
 
+# A request with an unknown, fictional API key over the API container's
+# loopback, a peer that uvicorn trusts with forwarded headers by default. The
+# forwarded address is a documentation address (RFC 5737).
+_LOOPBACK_PEER = "127.0.0.1"
+_FORWARDED_FOR = "203.0.113.7"
+_FORWARDED_REQUEST_SCRIPT = f"""
+import urllib.error
+import urllib.request
+
+request = urllib.request.Request(
+    "http://{_LOOPBACK_PEER}:8000/api/v1/users/me",
+    headers={{
+        "Authorization": "Bearer stl_ak_" + "x" * 32,
+        "X-Forwarded-For": "{_FORWARDED_FOR}",
+        "X-Forwarded-Proto": "https",
+    }},
+)
+try:
+    urllib.request.urlopen(request, timeout=10)
+except urllib.error.HTTPError as error:
+    print(error.code)
+"""
+_LOG_TIMEOUT_SECONDS = 15.0
+
 
 @pytest.mark.image
 def test_default_api_command_serves_health_readiness_and_openapi(
@@ -79,6 +104,41 @@ def test_default_api_command_serves_health_readiness_and_openapi(
     openapi = http_client.get("/api/openapi.json")
     assert openapi.status_code == 200
     assert openapi.json()["info"]["title"] == "Sentinel"
+
+
+@pytest.mark.image
+def test_default_api_command_ignores_forwarded_headers(
+    compose_exec: Callable[..., subprocess.CompletedProcess[str]],
+    compose_logs: Callable[[str], str],
+) -> None:
+    """The source IP of an unknown API key is the peer address, never a
+    forwarded header (authentication.md, API key validation; deployment.md,
+    Container Images).
+
+    The request comes from loopback, which uvicorn trusts by default, and the
+    smoke stack sets ``FORWARDED_ALLOW_IPS`` and ``UVICORN_PROXY_HEADERS`` to
+    values that would turn the processing on for every peer. uvicorn processes
+    ``X-Forwarded-For`` and ``X-Forwarded-Proto`` in the same middleware, so
+    the peer address shows whether that processing runs.
+    """
+    result = compose_exec("api", "python", "-c", _FORWARDED_REQUEST_SCRIPT)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "401", result.stdout
+
+    deadline = time.monotonic() + _LOG_TIMEOUT_SECONDS
+    while True:
+        logs = compose_logs("api")
+        failures = [
+            record
+            for record in json_log_records(logs)
+            if record.get("event") == "api_key_validation_failed"
+        ]
+        if failures or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+
+    assert [record.get("source_ip") for record in failures] == [_LOOPBACK_PEER], logs
+    assert _FORWARDED_FOR not in logs, logs
 
 
 @pytest.mark.image
