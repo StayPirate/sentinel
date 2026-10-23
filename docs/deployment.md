@@ -1481,13 +1481,13 @@ enumeration of all process roles.
 The API server is started as `uvicorn app.main:app --host 0.0.0.0 --port 8000
 --no-proxy-headers`, the image's default command. `--no-proxy-headers` turns
 off uvicorn's processing of the `X-Forwarded-For` and `X-Forwarded-Proto`
-request headers, which is otherwise on: for a request from a trusted address,
-by default a loopback address, or one listed in `FORWARDED_ALLOW_IPS`, uvicorn
-would replace the peer address and the scheme with values taken from those
-headers, which a client can set. The application uses the peer address as the
-source IP of the warning for an unknown API key and trusts no forwarded header
-(`docs/features/identity/authentication.md`, API key validation), so the peer
-address is the address of the connection: behind a reverse proxy, the
+request headers, which is otherwise on: for a request from a trusted address
+(those listed in `FORWARDED_ALLOW_IPS`, by default the loopback addresses),
+uvicorn would replace the peer address and the scheme with values taken from
+those headers, which a client can set. The application uses the peer address
+as the source IP of the warning for an unknown API key and trusts no forwarded
+header (`docs/features/identity/authentication.md`, API key validation), so
+the peer address is the address of the connection: behind a reverse proxy, the
 proxy's. The command-line option takes precedence over uvicorn's environment
 variables, so neither `FORWARDED_ALLOW_IPS` nor `UVICORN_PROXY_HEADERS`
 changes this. A deployment that replaces the API command keeps
