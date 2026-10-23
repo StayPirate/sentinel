@@ -28,7 +28,8 @@ async def bootstrap_fetcher_configs(db: AsyncSession) -> None:
     disabled, custom run_timeout/request_delay/custom_settings) is
     always preserved. Flushes so database errors surface at this
     boundary. Never commits or rolls back — the caller's startup
-    workflow (FastAPI lifespan, worker handler, Beat handler) owns the
+    workflow (FastAPI lifespan, worker handler, Beat handler) or the
+    example dataset loader, before it disables every fetcher, owns the
     transaction.
 
     If `FETCHER_REGISTRY` is empty, still issues a bounded `SELECT`

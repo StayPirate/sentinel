@@ -2043,8 +2043,10 @@ async def upsert_cve(
 
     Category A trusted system composition (cve-service.md, Primary Entry
     Point: `upsert_cve()`; Complete `upsert_cve()` Composition steps 1-9;
-    Concurrency; Transaction Boundaries, Phase 1). Callers are CVE fetchers
-    and the on-demand fetch path; never an API, CLI, or consumer boundary.
+    Concurrency; Transaction Boundaries, Phase 1). Callers are CVE fetchers,
+    the on-demand fetch path, and the example dataset loader in place of
+    the fetcher of the represented source (example-dataset.md); never an
+    API, CLI, or consumer boundary.
 
     Q1: `cve_id` is a pre-validated canonical CVE-ID; `source` is the
     fetcher's `CVESourceType` member; `cve_data` is a constructed
