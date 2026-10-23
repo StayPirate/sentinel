@@ -49,6 +49,9 @@ jobs:
         run: |
           set -euo pipefail
           log_file="${RUNNER_TEMP}/renovate.ndjson"
+          # Renovate forces command-line options over renovate.jsonc,
+          # packageRules included (forceCli), so only global options go
+          # here: --enabled=true would turn every enabled: false rule on.
           docker run --rm --pull=never \
             -v "${GITHUB_WORKSPACE}:/workspace:ro" \
             -w /workspace \
@@ -59,8 +62,7 @@ jobs:
             --platform=local \
             --dry-run=lookup \
             --require-config=required \
-            --onboarding=false \
-            --enabled=true 2>&1 | tee "${log_file}"
+            --onboarding=false 2>&1 | tee "${log_file}"
           # One stream keeps the tolerated warnings (stdout) ahead of the
           # blocking ones (stderr) in the job log.
           python3 scripts/validate_renovate_log.py "${log_file}" 2>&1
