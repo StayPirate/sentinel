@@ -1711,7 +1711,8 @@ required status checks and applies to administrators as well.
 **No manual tags**: tags are created exclusively by release-please.
 
 **Squash merge**: the only allowed merge method. The PR title becomes
-the commit message on `master`.
+the commit message on `master`, except where `docs/deployment.md`
+(Squash Merge) requires the merging maintainer to set the subject.
 
 **Branch deletion**: branches are deleted automatically after merge.
 
@@ -1789,7 +1790,9 @@ The 72-character hard-wrapping convention remains scoped to:
 ### Versioning
 
 PR titles become commit subjects on `master` through squash merge and therefore
-carry the release signal used by release-please:
+carry the release signal used by release-please (for the cases in which a
+maintainer sets the subject at merge instead, see `docs/deployment.md`, Squash
+Merge):
 
 | Commit type | Release signal |
 |-------------|----------------|

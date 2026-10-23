@@ -495,7 +495,7 @@ they feed in [Environments](#environments).
 | `release-please.yml` | `workflow_run` after a successful CI run on `master` | Creates and updates the Release PR; on merge creates the version tag and a draft GitHub Release | Yes (release path) |
 | `build-images.yml` | `workflow_run` after a successful CI run on `master`; push of a `v*` tag | Builds the backend image once, runs the image smoke and SBOM gates, extracts the image's OpenAPI document, and publishes the same digest to `ghcr.io`; version-tag runs also publish release SBOM and provenance attestations, attach the release assets, and publish the draft GitHub Release | Yes (publish gate) |
 | `deploy-api-docs.yml` | Push of a `v*` tag | Publishes the OpenAPI document and API documentation site of the latest version tag to GitHub Pages (see API Documentation Publication) | Yes (release path) |
-| `image-scan.yml` | Weekly schedule, manual | Scans the published image for OS-level vulnerabilities and opens, updates, or closes a tracking issue | No |
+| `image-scan.yml` | Weekly schedule; `workflow_run` after a successful version-tag run of `build-images.yml`; manual | Scans the published image for OS-level vulnerabilities and opens, updates, or closes a tracking issue | No |
 | `python-forward-compat.yml` | Weekly schedule, manual | Runs the default in-process and local process system suites and the strict type check on the next Python minor version and reports the result through its Actions status and logs | No |
 | `renovate-validation.yml` | Pull request opened, synchronized, or reopened; manual | Validates `renovate.jsonc` and performs a read-only Renovate dependency lookup in a pinned container | No |
 | `cleanup-images.yml` | Weekly schedule, manual | Bounds the pool of untagged image versions in the registry | No |
@@ -660,10 +660,13 @@ three complementary mechanisms:
   `renovate.jsonc` sets this prefix on vulnerability-fix PRs. Routine
   updates and lock file maintenance use `chore(deps):` and never create a
   release on their own. A security fix delivered by a lock file
-  maintenance PR or a manual PR is merged with a `fix(deps):` title so
-  that release-please proposes a patch release; the hidden `chore` type
-  is not made visible for this purpose, because it would turn every
-  routine update and infrastructure change into a release.
+  maintenance PR or a manually opened PR lands on `master` with a
+  `fix(deps):` commit subject — the title of a manually opened PR, or for
+  a lock file maintenance PR the subject set when squash-merging (see
+  Squash Merge) — so that release-please proposes a patch release; the
+  hidden `chore` type is not made visible for this purpose, because it
+  would turn every routine update and infrastructure change into a
+  release.
 - **`pip-audit`** in `ci.yml` (`Backend Security Scan`) audits the set
   locked in `backend/uv.lock` and blocks every change to
   `backend/pyproject.toml` or `backend/uv.lock` and every Release PR — see
@@ -819,7 +822,7 @@ and other C/Rust-extension packages, not just refreshing a digest.
 Patch-level freshness for this base image continues to flow through
 the automated digest refresh described above, unaffected by that rule.
 Base image freshness against known vulnerabilities is monitored
-separately by the weekly Trivy scan — see Image Vulnerability
+separately by the Trivy image scan — see Image Vulnerability
 Monitoring below.
 
 **uv image pinning.** The `builder` stage copies the `uv` binary from
@@ -1036,7 +1039,24 @@ repository level). This keeps the git history linear and gives
 release-please a clean, single commit to analyze per PR. With squash
 merge, the PR title becomes the commit message — ensure it follows the
 Conventional Commits format defined in `docs/conventions.md` (Git
-Conventions).
+Conventions). The merging maintainer replaces that subject only where
+this document requires a release signal that the PR title cannot carry:
+
+- a Renovate lock file maintenance PR that delivers a security fix (see
+  Workflow Conventions, Python dependency updates and vulnerability
+  response); and
+- a Renovate base-digest refresh that remediates an open image-scan
+  tracking issue (see Image Vulnerability Monitoring, Remediation path).
+
+Both require a `fix(deps):` subject, but renaming the PR does not last:
+Renovate restores its own `chore(deps):` title when it next processes a PR
+whose title differs from the one it generates. The maintainer therefore
+sets the subject when squash-merging, for example
+`gh pr merge <number> --squash --subject "fix(deps): <description> (#<number>)"`.
+The replacement follows the same Conventional Commits format and length
+limit; CI validates only the PR title, so the maintainer checks the
+subject before confirming the merge. A manually opened PR carries
+`fix(deps):` in its title instead.
 
 ### Changelog
 
@@ -1073,6 +1093,8 @@ build-images.yml (workflow_run, gated behind CI on master; also push tags)
      → version tags: signed SBOM/provenance attestations
        → attaches SBOM + attestation bundles + OpenAPI document
        → publishes the GitHub Release
+       → on success: image-scan.yml scans `latest` (workflow_run,
+         non-blocking; see Image Vulnerability Monitoring)
      │
      ▼
 manual deployment from tag (staging/production)
@@ -2349,10 +2371,23 @@ revert promptly.
 
 ### Image Vulnerability Monitoring
 
-A weekly scheduled workflow (`.github/workflows/image-scan.yml`) scans
-the published `ghcr.io/<repo>:latest` backend image for OS-level
-vulnerabilities using Trivy. It also supports manual dispatch for
-on-demand checks between scheduled runs.
+A workflow (`.github/workflows/image-scan.yml`) scans the published
+`ghcr.io/<repo>:latest` backend image for OS-level vulnerabilities using
+Trivy. It runs on a weekly schedule, after every successful version-tag
+run of `build-images.yml`, and on manual dispatch for on-demand checks.
+
+**Triggers.** `latest` changes only when a version-tag build pushes its
+image (see Image Tag Semantics), and the release-metadata job of the same
+run publishes the GitHub Release as its last step. The `workflow_run`
+trigger therefore scans the image of a new release as soon as its
+version-tag run succeeds, so a release that ships a remediated image
+closes the tracking issue without waiting for the next weekly run. The
+weekly run covers advisories published between releases against the
+unchanged image. Other completions of `build-images.yml` do not run the
+scan: `master` builds never move `latest`, and a failed run may not have
+published its release. The trigger follows the workflow run rather than
+the GitHub Release `published` event, because the release is published
+with the workflow's `GITHUB_TOKEN`, whose events start no workflow runs.
 
 **Why the OS layer needs its own visibility.** Python dependencies are
 covered by GitHub Dependabot alerts, Renovate vulnerability-fix PRs, and
@@ -2364,11 +2399,13 @@ the `PYTHON_BASE_DIGEST` `ARG` (see Container Build Conventions, Base
 image pinning) when a new base image digest is published, but that is
 a forward-looking freshness mechanism — it does not scan the image
 version already published to `ghcr.io` for currently known
-vulnerabilities. Trivy's weekly scan is the mechanism that detects
-those vulnerabilities in the layer already shipped.
+vulnerabilities. The Trivy scan is the mechanism that detects those
+vulnerabilities in the layer already shipped.
 
 **Deliberately non-blocking.** This scan never fails the workflow run
 and is not part of the publish path (`build-images.yml` is untouched).
+Its release trigger starts only after the version-tag run has completed,
+so a scan result cannot delay or alter a publication.
 Many Debian OS package CVEs are "will not fix" upstream, and even
 fixable ones require a rebuild of the base image — a remediation the
 project does not control on demand. Blocking image publication on a
@@ -2405,11 +2442,26 @@ current digest manually (e.g. `docker buildx imagetools inspect
 python:3.14-slim` or an equivalent registry query) and opens a PR
 directly.
 
+A merged refresh reaches the scanned image only with the next release,
+because `latest` moves only on a version-tag build. Renovate titles a
+digest refresh `chore(deps):`, a type that creates no release on its own
+(see Semantic Versioning Policy). A refresh merged to remediate an open
+tracking issue therefore lands on `master` with a `fix(deps):` commit
+subject, so that release-please proposes a patch release that ships it —
+the same release signal as a Python security fix (see Workflow
+Conventions, Python dependency updates and vulnerability response). A
+manually opened PR carries it in its title; for a Renovate PR it is set
+when squash-merging (see Squash Merge). Refreshes merged while no tracking
+issue is open keep `chore(deps):`. The scan that runs after the release
+confirms the remediation: it closes the tracking issue, or updates it if a
+fixable finding remains.
+
 Packages that `backend/Dockerfile` installs itself (the runtime stage's
 `git` and its dependencies) are scanned too, but their layer is rebuilt only
 when a build-cache input of that layer changes, in practice the base image
 digest. A fixable finding in such a package is therefore resolved by the next
-base-digest refresh and remains open until then; this delay is accepted.
+base-digest refresh, once a release ships it, and remains open until then;
+this delay is accepted.
 
 ### Python Forward-Compatibility Check
 

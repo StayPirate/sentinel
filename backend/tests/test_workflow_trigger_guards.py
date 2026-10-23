@@ -31,6 +31,10 @@ relationship — a push-triggered, successful run is allowed, but every
 other combination (wrong event, failed conclusion, or both) is
 rejected. See issue #185.
 
+`image-scan.yml` follows completed `build-images.yml` runs with the same
+guard, which there selects the successful version-tag (`push`) path: the
+run that moves `latest` and publishes the release. See issue #1082.
+
 The condition is read from the parsed workflow (`tests/support/yaml_files.py`),
 so it is always the job-level `if:`, whatever the order of the job's keys.
 """
@@ -65,7 +69,7 @@ def _evaluate_condition(
     expression, substituting the three context values this module cares
     about with literal strings.
 
-    Only handles the operators actually used by these two workflows'
+    Only handles the operators actually used by these workflows'
     guard conditions (`==`, `!=`, `&&`, `||`, parentheses) — not a
     general GitHub Actions expression evaluator. The substituted values
     come exclusively from this test module's own parametrization (never
@@ -180,6 +184,65 @@ class TestReleasePleaseGuard:
             event_name="workflow_run",
             workflow_run_event="pull_request",
             workflow_run_conclusion="failure",
+        )
+
+
+@pytest.mark.unit
+class TestImageScanGuard:
+    """`image-scan.yml` runs unconditionally on its schedule and on manual
+    dispatch, and after a completed `build-images.yml` run only when that
+    run was the version-tag (`push`) path and succeeded. A `master` build
+    (`workflow_run` path) never moves `latest`."""
+
+    def _condition(self) -> str:
+        return _job_if_condition(WORKFLOWS_DIR / "image-scan.yml", "image-scan")
+
+    def test_image_scan_trigger_follows_completed_build_images_runs(self) -> None:
+        triggers = load_yaml_file(WORKFLOWS_DIR / "image-scan.yml")["on"]
+        build_images = load_yaml_file(WORKFLOWS_DIR / "build-images.yml")
+
+        # A renamed build workflow would silently stop the trigger.
+        assert triggers["workflow_run"] == {
+            "workflows": [build_images["name"]],
+            "branches-ignore": ["master"],
+            "types": ["completed"],
+        }
+        assert "schedule" in triggers
+        assert "workflow_dispatch" in triggers
+
+    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch"])
+    def test_scheduled_and_manual_runs_always_allowed(self, event_name: str) -> None:
+        # Outside workflow_run the workflow_run fields are absent.
+        assert _evaluate_condition(
+            self._condition(),
+            event_name=event_name,
+            workflow_run_event="",
+            workflow_run_conclusion="",
+        )
+
+    def test_successful_version_tag_build_allowed(self) -> None:
+        assert _evaluate_condition(
+            self._condition(),
+            event_name="workflow_run",
+            workflow_run_event="push",
+            workflow_run_conclusion="success",
+        )
+
+    def test_master_build_rejected(self) -> None:
+        assert not _evaluate_condition(
+            self._condition(),
+            event_name="workflow_run",
+            workflow_run_event="workflow_run",
+            workflow_run_conclusion="success",
+        )
+
+    @pytest.mark.parametrize("conclusion", ["failure", "cancelled"])
+    def test_unsuccessful_version_tag_build_rejected(self, conclusion: str) -> None:
+        assert not _evaluate_condition(
+            self._condition(),
+            event_name="workflow_run",
+            workflow_run_event="push",
+            workflow_run_conclusion=conclusion,
         )
 
 
