@@ -49,6 +49,19 @@ class ImageSmokeContext:
         return replace(self, project=project)
 
 
+def json_log_records(logs: str) -> list[dict[str, Any]]:
+    """The structured log records of a log stream; other lines are ignored."""
+    records: list[dict[str, Any]] = []
+    for line in logs.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
 def _required_environment(name: str) -> str:
     value = os.environ.get(name)
     if value is None or not value.strip():

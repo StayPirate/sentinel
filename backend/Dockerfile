@@ -114,4 +114,8 @@ USER 1000:1000
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-proxy-headers: uvicorn never takes the peer address or the scheme from
+# X-Forwarded-For or X-Forwarded-Proto, whatever FORWARDED_ALLOW_IPS or
+# UVICORN_PROXY_HEADERS contains (docs/deployment.md, Container Images;
+# docs/features/identity/authentication.md, API key validation).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]

@@ -1749,6 +1749,13 @@ artifact facts without duplicating focused behavior tests:
   disposable failed-migration ordering scenario;
 - external `/health`, `/ready`, and `/api/openapi.json` availability through the
   candidate's default API command;
+- the default API command ignoring forwarded headers: a request with an
+  unknown API key and `X-Forwarded-For` over the API container's loopback
+  produces an `api_key_validation_failed` warning with the loopback peer
+  address, and the forwarded address appears in no API log record, while the
+  stack sets `FORWARDED_ALLOW_IPS` and `UVICORN_PROXY_HEADERS` for the API to
+  values that would otherwise turn the processing on (`docs/deployment.md`,
+  Container Images);
 - startup of each implemented API, worker, Git worker, Beat, and IBS RabbitMQ
   consumer role from the same image, with representative worker task
   registration, the queue each worker role consumes, Beat post-reconciliation

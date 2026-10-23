@@ -79,6 +79,14 @@ services:
     <<: *app-common
     # Deliberately no command override: the gate exercises the image's default
     # API command from backend/Dockerfile.
+    # Hostile uvicorn environment: FORWARDED_ALLOW_IPS trusts the forwarded
+    # headers of every peer and UVICORN_PROXY_HEADERS turns their processing
+    # on. The default command must ignore both (docs/deployment.md, Container
+    # Images; backend/tests/image/test_image_build.py).
+    environment:
+      <<: *app-environment
+      FORWARDED_ALLOW_IPS: "*"
+      UVICORN_PROXY_HEADERS: "true"
     # Depends on `migrate` reaching successful completion, not just on
     # infrastructure health — see docs/deployment.md (Container Images,
     # Startup Ordering). This makes the migration prerequisite
