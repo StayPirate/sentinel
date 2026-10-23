@@ -98,13 +98,29 @@ class TestRouteNotFound:
         assert response.status_code == 404
         assert response.json() == _ROUTE_NOT_FOUND
 
-    async def test_trailing_slash_redirects_to_the_endpoint_path(
+    async def test_every_endpoint_path_with_a_trailing_slash_returns_route_not_found(
         self, client: AsyncClient
     ) -> None:
-        response = await client.post("/api/v1/tickets/")
+        """The path is not redirected to the endpoint path: a redirect built
+        from the request would point a client behind a TLS-terminating proxy
+        at `http://`. Each registered path is requested with every method it
+        serves, so a new endpoint is covered without changing this test. A
+        response to `HEAD` has no body."""
+        expected: dict[tuple[str, str], tuple[int, str | None, dict[str, Any]]] = {}
+        observed: dict[tuple[str, str], tuple[int, str | None, dict[str, Any]]] = {}
 
-        assert response.status_code == 307
-        assert response.headers["location"] == "http://test/api/v1/tickets"
+        for path, methods in _registered_methods().items():
+            for method in methods:
+                body = {} if method == "HEAD" else _ROUTE_NOT_FOUND
+                expected[path, method] = (404, None, body)
+                response = await client.request(method, _concrete(path) + "/")
+                observed[path, method] = (
+                    response.status_code,
+                    response.headers.get("location"),
+                    response.json() if response.content else {},
+                )
+
+        assert observed == expected
 
 
 @pytest.mark.e2e

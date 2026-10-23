@@ -801,10 +801,9 @@ reference lines are not used.
 ### Routing Responses
 
 Routing selects the endpoint for a request from its path and method. A request
-for which routing selects no endpoint receives one of these responses, or the
-trailing-slash redirect described below, on every path, including paths outside
-`/api/v1/`, unless Cross-Origin Request Protection, which precedes routing,
-rejects it first:
+for which routing selects no endpoint receives one of these responses on every
+path, including paths outside `/api/v1/`, unless Cross-Origin Request
+Protection, which precedes routing, rejects it first:
 
 | Status | Code | Detail | Condition |
 |--------|------|--------|-----------|
@@ -813,9 +812,12 @@ rejects it first:
 
 - The `405` response carries an `Allow` header listing every method that has
   an endpoint for the request path.
-- A request path that matches no endpoint path, but would match one with a
-  trailing slash added or removed, is redirected with `307 Temporary Redirect`
-  to that path, keeping the method; the redirected request is routed as usual.
+- A trailing slash is part of the path: a request path that would match an
+  endpoint path only with a trailing slash added or removed, such as
+  `/api/v1/tickets/`, receives `404 ROUTE_NOT_FOUND` and is not redirected. No
+  routing response is a redirect, so none depends on the scheme or the `Host`
+  header with which the request reaches the API; behind a reverse proxy that
+  terminates TLS, that scheme is `http` (`docs/deployment.md`, Sentinel Host).
 - Routing precedes JSON body decoding, every shared request-input constraint,
   authentication, and authorization, so neither response depends on the body
   or the credentials sent.
