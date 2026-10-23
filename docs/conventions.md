@@ -1790,8 +1790,9 @@ The 72-character hard-wrapping convention remains scoped to:
 ### Versioning
 
 PR titles become commit subjects on `master` through squash merge and therefore
-carry the release signal used by release-please; the subjects that a maintainer
-sets at merge instead are listed in `docs/deployment.md` (Squash Merge):
+carry the release signal used by release-please (for the cases in which a
+maintainer sets the subject at merge instead, see `docs/deployment.md`, Squash
+Merge):
 
 | Commit type | Release signal |
 |-------------|----------------|

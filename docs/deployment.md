@@ -660,12 +660,13 @@ three complementary mechanisms:
   `renovate.jsonc` sets this prefix on vulnerability-fix PRs. Routine
   updates and lock file maintenance use `chore(deps):` and never create a
   release on their own. A security fix delivered by a lock file
-  maintenance PR or a manual PR lands on `master` with a `fix(deps):`
-  commit subject — the title of a manual PR, or for a lock file
-  maintenance PR the subject set when squash-merging (see Squash Merge) —
-  so that release-please proposes a patch release; the hidden `chore` type
-  is not made visible for this purpose, because it would turn every
-  routine update and infrastructure change into a release.
+  maintenance PR or a manually opened PR lands on `master` with a
+  `fix(deps):` commit subject — the title of a manually opened PR, or for
+  a lock file maintenance PR the subject set when squash-merging (see
+  Squash Merge) — so that release-please proposes a patch release; the
+  hidden `chore` type is not made visible for this purpose, because it
+  would turn every routine update and infrastructure change into a
+  release.
 - **`pip-audit`** in `ci.yml` (`Backend Security Scan`) audits the set
   locked in `backend/uv.lock` and blocks every change to
   `backend/pyproject.toml` or `backend/uv.lock` and every Release PR — see
@@ -1052,9 +1053,10 @@ Renovate restores its own `chore(deps):` title when it next processes a PR
 whose title differs from the one it generates. The maintainer therefore
 sets the subject when squash-merging, for example
 `gh pr merge <number> --squash --subject "fix(deps): <description> (#<number>)"`.
-The replacement follows the same format; CI validates only the PR title,
-so the maintainer checks the subject before confirming the merge. A
-maintainer's own PR carries `fix(deps):` in its title instead.
+The replacement follows the same Conventional Commits format and length
+limit; CI validates only the PR title, so the maintainer checks the
+subject before confirming the merge. A manually opened PR carries
+`fix(deps):` in its title instead.
 
 ### Changelog
 
@@ -2448,7 +2450,7 @@ tracking issue therefore lands on `master` with a `fix(deps):` commit
 subject, so that release-please proposes a patch release that ships it —
 the same release signal as a Python security fix (see Workflow
 Conventions, Python dependency updates and vulnerability response). A
-maintainer's own PR carries it in its title; for a Renovate PR it is set
+manually opened PR carries it in its title; for a Renovate PR it is set
 when squash-merging (see Squash Merge). Refreshes merged while no tracking
 issue is open keep `chore(deps):`. The scan that runs after the release
 confirms the remediation: it closes the tracking issue, or updates it if a
