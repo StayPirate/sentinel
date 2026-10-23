@@ -2422,11 +2422,22 @@ current digest manually (e.g. `docker buildx imagetools inspect
 python:3.14-slim` or an equivalent registry query) and opens a PR
 directly.
 
-A merged refresh reaches the scanned image only with the next release:
-`latest` moves only on a version-tag build, and Renovate titles a digest
-refresh `chore(deps):`, a type that creates no release on its own (see
-Semantic Versioning Policy). The scan that runs after that release closes
-the tracking issue.
+A merged refresh reaches the scanned image only with the next release,
+because `latest` moves only on a version-tag build. Renovate titles a
+digest refresh `chore(deps):`, a type that creates no release on its own
+(see Semantic Versioning Policy). A refresh merged to remediate an open
+tracking issue, whether proposed by Renovate or by a maintainer, therefore
+lands on `master` with a `fix(deps):` commit subject, so that
+release-please proposes a patch release that ships it — the same release
+signal as a Python security fix (see Workflow Conventions, Python
+dependency updates and vulnerability response). For a Renovate PR the
+subject is set when squash-merging, for example
+`gh pr merge <number> --squash --subject "fix(deps): <description> (#<number>)"`,
+rather than by renaming the PR: Renovate restores its own title when it
+next processes a PR whose title differs from the one it generates.
+Refreshes merged while no tracking issue is open keep `chore(deps):`. The
+scan that runs after the release confirms the remediation: it closes the
+tracking issue, or updates it if a fixable finding remains.
 
 Packages that `backend/Dockerfile` installs itself (the runtime stage's
 `git` and its dependencies) are scanned too, but their layer is rebuilt only
