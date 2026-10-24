@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.0](https://github.com/vulnwatch/sentinel/compare/v0.11.0...v0.12.0) (2026-10-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** answer trailing-slash paths with ROUTE_NOT_FOUND ([#1086](https://github.com/vulnwatch/sentinel/issues/1086))
+
+### Bug Fixes
+
+* **api:** answer trailing-slash paths with ROUTE_NOT_FOUND ([#1086](https://github.com/vulnwatch/sentinel/issues/1086)) ([25777c3](https://github.com/vulnwatch/sentinel/commit/25777c3ac7a23aa10737cf8ef3d3ea4884b941c4)), closes [#1075](https://github.com/vulnwatch/sentinel/issues/1075)
+* start the API server without forwarded-header processing ([#1088](https://github.com/vulnwatch/sentinel/issues/1088)) ([a2a7492](https://github.com/vulnwatch/sentinel/commit/a2a74928ed044e61f69bb8732e8484db208e0fd4))
+
 ## [0.11.0](https://github.com/vulnwatch/sentinel/compare/v0.10.3...v0.11.0) (2026-10-23)
 
 
