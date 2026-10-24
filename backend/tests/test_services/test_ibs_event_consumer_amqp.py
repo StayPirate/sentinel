@@ -616,8 +616,9 @@ class TestBounds:
     ) -> None:
         """The broker answers neither `Channel.Close` nor `Connection.Close`:
         the channel closure, which would otherwise wait indefinitely, ends at
-        its bound, the connection closure still follows (aiormq does not
-        wait for `Connection.CloseOk`), and `close()` never raises."""
+        its bound, the connection closure still sends `Connection.Close` and
+        its wait for `Connection.CloseOk` ends at its bound too, and `close()`
+        never raises."""
         monkeypatch.setattr(ibs_event_consumer, "CLOSE_TIMEOUT_SECONDS", _BOUND)
         epoch = await connect_amqp(broker.url, _tls_context(), Sink())
         server = await broker.connection()
